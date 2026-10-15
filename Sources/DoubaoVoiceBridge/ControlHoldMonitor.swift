@@ -29,11 +29,13 @@ final class ControlHoldMonitor {
     private let customTargetWindowCapture: ((UURemoteTarget) -> Bool)?
     private let customEventReplay: ((CGEventTapProxy, CGEvent) -> Void)?
     private let syntheticKeyboardEventPoster: ((KeyboardShortcut, Bool) -> Bool)?
+    private let syntheticAnyKeyEventPoster: (() -> Bool)?
     private let bridgeApplicationOwnsFocus: () -> Bool
     private let onBegin: (UURemoteTarget, ShortcutProfile) -> Void
     private let onFnToggleMayBeActive: () -> Void
     private let onRelease: () -> Void
     private let onCancel: () -> Void
+    private let onTriggerUnavailable: (String) -> Void
     private let logger = Logger(subsystem: "com.lyp.DoubaoVoiceBridge", category: "control")
 
     private(set) var profile: ShortcutProfile?
@@ -55,6 +57,7 @@ final class ControlHoldMonitor {
     private var syntheticDownAt: Date?
     private var syntheticRoute: SyntheticControlRoute?
     private var localFocusDeadline: Date?
+    private var localComposerReachedReady = false
     private var fnFocusDeadline: Date?
     private var fnReadinessRetryCount = 0
     private var releaseRequestedBeforeSyntheticDown = false
@@ -77,6 +80,9 @@ final class ControlHoldMonitor {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private(set) var activeTapLocation: CGEventTapLocation?
+    private var bridgeBundleIdentifier: String {
+        Bundle.main.bundleIdentifier ?? "com.lyp.DoubaoVoiceBridge"
+    }
     var isGestureIdle: Bool {
         gesture.phase == .idle && fnGesture.phase == .idle && customPrefixEvents.isEmpty &&
             customSwallowedModifierKeyCodes.isEmpty && customSuppressedPrimaryKeyCodes.isEmpty &&
@@ -94,10 +100,12 @@ final class ControlHoldMonitor {
         onFnToggleMayBeActive: @escaping () -> Void,
         onRelease: @escaping () -> Void,
         onCancel: @escaping () -> Void,
+        onTriggerUnavailable: @escaping (String) -> Void = { _ in },
         customTargetWindowMatches: ((UURemoteTarget) -> Bool)? = nil,
         customTargetWindowCapture: ((UURemoteTarget) -> Bool)? = nil,
         customEventReplay: ((CGEventTapProxy, CGEvent) -> Void)? = nil,
         syntheticKeyboardEventPoster: ((KeyboardShortcut, Bool) -> Bool)? = nil,
+        syntheticAnyKeyEventPoster: (() -> Bool)? = nil,
         bridgeApplicationOwnsFocus: @escaping () -> Bool = {
             NSWorkspace.shared.frontmostApplication?.bundleIdentifier == Bundle.main.bundleIdentifier
         }
@@ -112,11 +120,13 @@ final class ControlHoldMonitor {
         self.customTargetWindowCapture = customTargetWindowCapture
         self.customEventReplay = customEventReplay
         self.syntheticKeyboardEventPoster = syntheticKeyboardEventPoster
+        self.syntheticAnyKeyEventPoster = syntheticAnyKeyEventPoster
         self.bridgeApplicationOwnsFocus = bridgeApplicationOwnsFocus
         self.onBegin = onBegin
         self.onFnToggleMayBeActive = onFnToggleMayBeActive
         self.onRelease = onRelease
         self.onCancel = onCancel
+        self.onTriggerUnavailable = onTriggerUnavailable
     }
 
     deinit {
@@ -206,7 +216,10 @@ final class ControlHoldMonitor {
         onCancel()
     }
 
-    func cancelIfFocusLost() {
+    func cancelIfFocusLost(
+        activatedBundleIdentifier: String? = nil,
+        at now: Date = Date()
+    ) {
         if let prefixTarget = customPrefixTarget, !isSameActiveTarget(prefixTarget) {
             logger.notice("Discarding buffered modifier prefix after UU focus changed")
             customOrphanedModifierKeyCodes.formUnion(customPrefixModifierKeyCodes)
@@ -215,9 +228,16 @@ final class ControlHoldMonitor {
             customPrefixTarget = nil
         }
         guard let target else { return }
-        let targetLost = activeProfile?.usesCustomBridge == true
-            ? !isSameActiveTarget(target)
-            : !targetIsActive(target)
+        if localComposerReady() { localComposerReachedReady = true }
+        let targetLost: Bool
+        let sameTarget = activeProfile?.usesCustomEventBridge == true
+            ? isSameActiveTarget(target)
+            : targetIsActive(target)
+        targetLost = !sameTarget && !isStartupBridgeActivationAllowed(
+            target: target,
+            activatedBundleIdentifier: activatedBundleIdentifier,
+            now: now
+        )
         guard targetLost else { return }
         if fnGesture.phase == .pendingClick {
             logger.notice("Pending Fn click cancelled because focus left UU and the bridge")
@@ -258,6 +278,16 @@ final class ControlHoldMonitor {
             }
         }
 
+        if activeProfile?.usesCustomEventBridge == true,
+           gesture.phase == .dictating,
+           !localComposerReady(),
+           isExternalInputDuringComposerStartup(type: type, keyCode: keyCode) {
+            logger.notice("Cancelling custom trigger startup after physical input arrived before the composer became ready")
+            resetGesture(notifyCancel: false)
+            onCancel()
+            return passthroughCustomEvent(proxy: proxy, event: event)
+        }
+
         if gesture.phase == .pending, let triggerTarget = target, !isSameActiveTarget(triggerTarget) {
             logger.notice("Dropping pending custom trigger after UU focus changed")
             _ = abortPendingCustomTrigger(proxy: proxy)
@@ -279,6 +309,11 @@ final class ControlHoldMonitor {
         }
         if !customOrphanedModifierKeyCodes.isEmpty {
             return neutralizeOrphanedModifierEvent(proxy: proxy, type: type, event: event)
+        }
+
+        if activeProfile?.usesFollowCustomToggleBridge == true, gesture.phase == .dictating {
+            let stopEvent = handleFollowCustomToggleStopEvent(type: type, event: event)
+            if stopEvent.handled { return stopEvent.result }
         }
 
         if type == .flagsChanged {
@@ -308,10 +343,6 @@ final class ControlHoldMonitor {
             }
 
             if customSwallowedModifierKeyCodes.contains(keyCode) {
-                if !isDown, customTriggerModifierKeyCodes.contains(keyCode), gesture.phase == .pending {
-                    _ = abortPendingCustomTrigger(proxy: proxy, releasingEvent: event)
-                    return nil
-                }
                 if customTriggerModifierKeyCodes.contains(keyCode), !isDown {
                     customTriggerModifierKeyCodes.remove(keyCode)
                     releaseCustomBridgeTrigger(proxy: proxy, releasingEvent: event)
@@ -395,6 +426,7 @@ final class ControlHoldMonitor {
             if gesture.phase == .pending { abortPendingCustomTrigger(proxy: proxy) }
             if customPrefixTarget == nil {
                 guard captureCustomTargetWindow(activeTarget) else {
+                    reportTargetCaptureFailure("无法安全读取 UU 当前窗口；请检查辅助功能权限并确认 UU 窗口可访问")
                     return passthroughCustomEvent(proxy: proxy, event: event)
                 }
                 customPrefixTarget = activeTarget
@@ -501,35 +533,128 @@ final class ControlHoldMonitor {
     ) -> Bool {
         guard case .idle = gesture.phase else { return false }
         if targetWindowAlreadyCaptured {
-            guard customTargetWindowIsCurrent(target) else { return false }
+            guard customTargetWindowIsCurrent(target) else {
+                reportTargetCaptureFailure("UU 远控窗口已变化；请点回目标窗口后再触发")
+                return false
+            }
         } else {
-            guard captureCustomTargetWindow(target) else { return false }
+            guard captureCustomTargetWindow(target) else {
+                reportTargetCaptureFailure("无法安全读取 UU 当前窗口；请检查辅助功能权限并确认 UU 窗口可访问")
+                return false
+            }
         }
         self.target = target
         activeProfile = profile
         _ = gesture.handle(.controlDown(targetAvailable: true))
-        let workItem = DispatchWorkItem { [weak self] in self?.activateDictationIfStillPending() }
-        activationWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + holdThreshold, execute: workItem)
+        if !profile.usesFollowCustomToggleBridge {
+            let workItem = DispatchWorkItem { [weak self] in self?.activateDictationIfStillPending() }
+            activationWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + holdThreshold, execute: workItem)
+        }
         return true
+    }
+
+    private func reportTargetCaptureFailure(_ message: String) {
+        logger.error("Trigger rejected because the original UU window could not be captured or verified")
+        onTriggerUnavailable(message)
+    }
+
+    private func isExternalInputDuringComposerStartup(type: CGEventType, keyCode: Int64) -> Bool {
+        if type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown || type == .scrollWheel {
+            return true
+        }
+        if type == .keyDown {
+            return !customSuppressedPrimaryKeyCodes.contains(keyCode)
+        }
+        guard type == .flagsChanged else { return false }
+        if customTriggerModifierKeyCodes.contains(keyCode) || customSwallowedModifierKeyCodes.contains(keyCode) {
+            return false
+        }
+        return KeyboardShortcut.modifierFlag(for: keyCode) != nil
     }
 
     private func releaseCustomBridgeTrigger(proxy: CGEventTapProxy, releasingEvent: CGEvent) {
         switch gesture.phase {
         case .pending:
-            _ = abortPendingCustomTrigger(proxy: proxy, releasingEvent: releasingEvent)
+            if activeProfile?.usesFollowCustomToggleBridge == true {
+                activateFollowCustomToggleIfStillPending(proxy: proxy)
+            } else {
+                _ = abortPendingCustomTrigger(proxy: proxy, releasingEvent: releasingEvent)
+            }
         case .dictating:
-            _ = gesture.handle(.controlUp)
-            finishDictationGesture()
+            if activeProfile?.usesFollowCustomToggleBridge != true {
+                _ = gesture.handle(.controlUp)
+                finishDictationGesture()
+            }
         case .idle, .passthrough:
             break
         }
+    }
+
+    private func activateFollowCustomToggleIfStillPending(proxy: CGEventTapProxy) {
+        guard gesture.phase == .pending,
+              let target,
+              let activeProfile,
+              activeProfile.usesFollowCustomToggleBridge,
+              isSameActiveTarget(target) else {
+            if gesture.phase == .pending {
+                _ = abortPendingCustomTrigger(proxy: proxy)
+            }
+            return
+        }
+        activationWorkItem?.cancel()
+        activationWorkItem = nil
+        _ = gesture.handle(.thresholdReached)
+        customTriggerDownEvents.removeAll()
+        logger.notice("Followed custom Doubao toggle released; opening local composer")
+        localFocusDeadline = Date().addingTimeInterval(0.75)
+        localComposerReachedReady = false
+        onBegin(target, activeProfile)
+        scheduleSyntheticDownCheck(after: 0.03)
+    }
+
+    private func handleFollowCustomToggleStopEvent(
+        type: CGEventType,
+        event: CGEvent
+    ) -> (handled: Bool, result: Unmanaged<CGEvent>?) {
+        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+        if type == .keyDown {
+            customSuppressedPrimaryKeyCodes.insert(keyCode)
+            finishDictationGesture()
+            return (true, nil)
+        }
+        guard type == .flagsChanged,
+              KeyboardShortcut.modifierFlag(for: keyCode) != nil else { return (false, nil) }
+        let isDown = keyCode == 63
+            ? event.flags.contains(.maskSecondaryFn)
+            : !physicalModifierKeyCodes.contains(keyCode)
+        guard isDown else { return (false, nil) }
+        if keyCode == 63 { physicalFnIsDown = true }
+        else { physicalModifierKeyCodes.insert(keyCode) }
+        customSwallowedModifierKeyCodes.insert(keyCode)
+        finishDictationGesture()
+        return (true, nil)
     }
 
     private func isSameActiveTarget(_ expected: UURemoteTarget) -> Bool {
         let targetIsFrontmost = targetProvider()?.processIdentifier == expected.processIdentifier
         return targetIsActive(expected) && customTargetWindowIsCurrent(expected) &&
             (targetIsFrontmost || bridgeApplicationOwnsFocus())
+    }
+
+    private func isStartupBridgeActivationAllowed(
+        target: UURemoteTarget,
+        activatedBundleIdentifier: String?,
+        now: Date
+    ) -> Bool {
+        guard !localComposerReachedReady,
+              let deadline = localFocusDeadline,
+              now < deadline,
+              activatedBundleIdentifier == bridgeBundleIdentifier,
+              !target.isTerminated,
+              customTargetWindowIsCurrent(target) else { return false }
+        logger.notice("Allowing the bridge app's bounded activation transition while the composer becomes ready")
+        return true
     }
 
     private func customTargetWindowIsCurrent(_ target: UURemoteTarget) -> Bool {
@@ -702,7 +827,7 @@ final class ControlHoldMonitor {
         if profile?.usesFnBridge == true {
             return handleFnToggleEvent(proxy: proxy, type: type, event: event)
         }
-        if profile?.usesCustomBridge == true {
+        if profile?.usesCustomEventBridge == true {
             return handleCustomBridgeEvent(proxy: proxy, type: type, event: event)
         }
         guard profile?.usesLeftControlBridge == true else {
@@ -936,8 +1061,14 @@ final class ControlHoldMonitor {
             return nil
         }
         fnCompanionKeySuppression.arm(at: ProcessInfo.processInfo.systemUptime)
-        target.captureFocusedWindow()
+        guard target.captureFocusedWindow() else {
+            resetFnToggle(notifyCancel: false)
+            reportTargetCaptureFailure("无法安全读取 UU 当前窗口；请检查辅助功能权限并确认 UU 窗口可访问")
+            return nil
+        }
         logger.notice("Physical Fn click confirmed; opening local dictation")
+        localFocusDeadline = Date().addingTimeInterval(0.75)
+        localComposerReachedReady = false
         onBegin(target, profile)
         fnFocusDeadline = Date().addingTimeInterval(0.75)
         fnReadinessRetryCount = 0
@@ -1002,6 +1133,7 @@ final class ControlHoldMonitor {
             }
             return
         }
+        localComposerReachedReady = true
         logger.notice("Local composer ready for synthetic Fn activation after retries=\(self.fnReadinessRetryCount, privacy: .public)")
         guard postSyntheticFn(down: true) else {
             logger.error("Unable to post synthetic local Fn down")
@@ -1072,6 +1204,8 @@ final class ControlHoldMonitor {
         syntheticFnDownPosted = false
         fnFocusDeadline = nil
         fnReadinessRetryCount = 0
+        localFocusDeadline = nil
+        localComposerReachedReady = false
         fnGesture.reset()
         activeProfile = nil
         target = nil
@@ -1101,6 +1235,9 @@ final class ControlHoldMonitor {
 
     @discardableResult
     private func postSyntheticAnyKeyToLocalComposer() -> Bool {
+        if let syntheticAnyKeyEventPoster {
+            return syntheticAnyKeyEventPoster()
+        }
         guard let source = CGEventSource(stateID: .combinedSessionState),
               let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 105, keyDown: true),
               let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 105, keyDown: false) else {
@@ -1203,12 +1340,12 @@ final class ControlHoldMonitor {
 
     func activateDictationIfStillPending() {
         guard case .pending = gesture.phase, let target else { return }
-        let targetIsValid = activeProfile?.usesCustomBridge == true
+        let targetIsValid = activeProfile?.usesCustomEventBridge == true
             ? isSameActiveTarget(target)
             : targetIsActive(target) && targetProvider()?.processIdentifier == target.processIdentifier
         guard targetIsValid else {
             logger.notice("Long-press cancelled because UU is no longer the eligible target")
-            if activeProfile?.usesCustomBridge == true {
+            if activeProfile?.usesCustomEventBridge == true {
                 discardCustomInterceptedGesture()
             }
             resetGesture(notifyCancel: false)
@@ -1216,23 +1353,26 @@ final class ControlHoldMonitor {
         }
         _ = gesture.handle(.thresholdReached)
         customTriggerDownEvents.removeAll()
-        if activeProfile?.usesCustomBridge == true {
+        if activeProfile?.usesCustomEventBridge == true {
             guard customTargetWindowIsCurrent(target) else {
                 logger.notice("Custom long-press cancelled because the captured UU window changed")
                 discardCustomInterceptedGesture()
                 resetGesture(notifyCancel: false)
                 return
             }
-        } else {
-            target.captureFocusedWindow()
+        } else if !captureCustomTargetWindow(target) {
+            reportTargetCaptureFailure("无法安全读取 UU 当前窗口；请检查辅助功能权限并确认 UU 窗口可访问")
+            resetGesture(notifyCancel: false)
+            return
         }
         logger.notice("Long-press threshold reached; opening local composer")
         guard let activeProfile else {
             resetGesture(notifyCancel: false)
             return
         }
-        onBegin(target, activeProfile)
         localFocusDeadline = Date().addingTimeInterval(0.75)
+        localComposerReachedReady = false
+        onBegin(target, activeProfile)
         scheduleSyntheticDownCheck(after: 0.03)
     }
 
@@ -1257,6 +1397,7 @@ final class ControlHoldMonitor {
             }
             return
         }
+        localComposerReachedReady = true
         logger.notice("Local composer is key and ready for Doubao voice input method")
         guard let activeProfile else {
             onCancel()
@@ -1401,6 +1542,7 @@ final class ControlHoldMonitor {
         syntheticDownAt = nil
         syntheticRoute = nil
         localFocusDeadline = nil
+        localComposerReachedReady = false
         releaseRequestedBeforeSyntheticDown = false
         customTriggerPrimaryKeyCode = nil
         customTriggerModifierKeyCodes.removeAll()

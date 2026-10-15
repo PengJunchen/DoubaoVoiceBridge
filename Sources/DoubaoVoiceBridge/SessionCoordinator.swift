@@ -73,7 +73,7 @@ final class SessionCoordinator {
         sessionShortcutProfile = profile
         localFnDictationActive = false
         state = .listening
-        let instruction = profile.bridgeInstruction + "；确认文字后自动发送"
+        let instruction = "远控触发：\(profile.bridgeInstruction)；确认文字后自动发送"
         panel.begin(
             targetDescription: "发送到 UU 远控",
             shortcutInstruction: instruction,

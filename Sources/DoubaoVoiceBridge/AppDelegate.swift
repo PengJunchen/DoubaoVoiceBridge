@@ -98,7 +98,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.coordinator.markLocalFnToggleMayBeActive()
             },
             onRelease: { [weak self] in self?.coordinator.controlReleased() },
-            onCancel: { [weak self] in self?.coordinator.cancel() }
+            onCancel: { [weak self] in self?.coordinator.cancel() },
+            onTriggerUnavailable: { [weak self] message in
+                DispatchQueue.main.async { self?.setStatus(message, isError: true) }
+            }
         )
         self.monitor = monitor
         coordinator.readyStatusProvider = { [weak self] in
@@ -106,7 +109,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return ShortcutTriggerReadiness.status(
                 profile: self.shortcutProfile,
                 setupPending: self.setupPending,
-                monitorActive: self.monitor?.activeTapLocation != nil
+                monitorActive: self.monitor?.activeTapLocation != nil,
+                accessibilityTrusted: AXIsProcessTrusted()
             )
         }
         coordinator.onUserCancelRequested = { [weak self] metadata in
@@ -204,10 +208,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         menu.addItem(status)
 
-        let instructionText = shortcutProfile?.bridgeInstruction ?? "完成豆包与远控快捷键配置后启用"
-        let instruction = NSMenuItem(title: instructionText, action: nil, keyEquivalent: "")
-        instruction.isEnabled = false
-        menu.addItem(instruction)
+        let instructionLines = shortcutProfile?.statusMenuLines ?? [
+            "远控触发键：未设置",
+            "豆包语音键：未设置"
+        ]
+        for line in instructionLines {
+            let instruction = NSMenuItem(title: line, action: nil, keyEquivalent: "")
+            instruction.isEnabled = false
+            menu.addItem(instruction)
+        }
         let source = NSMenuItem(
             title: shortcutConfiguration?.sourceAndTime ?? "来源：未检测到可用设置",
             action: nil,
@@ -267,7 +276,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             setStatus("请先点回 UU 远控，再使用豆包快捷键", isError: true)
             return
         }
-        target.captureFocusedWindow()
+        guard target.captureFocusedWindow() else {
+            setStatus("无法安全读取 UU 当前窗口；请检查辅助功能权限并确认 UU 窗口可访问", isError: true)
+            return
+        }
         coordinator.begin(target: target, profile: shortcutProfile, manualEntry: true)
     }
 
@@ -411,22 +423,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if promptIfNeeded {
                     requestRequiredPermissions()
                 }
-                if permissionRetryTimer == nil {
-                    permissionRetryTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-                        self?.startMonitorOrRequestPermissions(promptIfNeeded: false)
-                    }
-                }
+                schedulePermissionRetryIfNeeded()
                 return
             }
         }
         permissionRetryTimer?.invalidate()
         permissionRetryTimer = nil
+        guard AXIsProcessTrusted() else {
+            let message = "快捷键监听已启动；需要辅助功能权限才能安全读取 UU 窗口并打开听写框"
+            if statusText != message { setStatus(message, isError: true) }
+            schedulePermissionRetryIfNeeded()
+            return
+        }
         if let readyStatus = ShortcutTriggerReadiness.status(
             profile: profile,
             setupPending: setupPending,
-            monitorActive: monitor.activeTapLocation != nil
+            monitorActive: monitor.activeTapLocation != nil,
+            accessibilityTrusted: AXIsProcessTrusted()
         ) {
             setStatus(readyStatus, isError: false)
+        }
+    }
+
+    private func schedulePermissionRetryIfNeeded() {
+        guard permissionRetryTimer == nil else { return }
+        permissionRetryTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.startMonitorOrRequestPermissions(promptIfNeeded: false)
         }
     }
 
@@ -440,8 +462,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
-            self?.monitor?.cancelIfFocusLost()
+        ) { [weak self] notification in
+            let bundleIdentifier = (notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier
+            self?.monitor?.cancelIfFocusLost(activatedBundleIdentifier: bundleIdentifier)
         }
         workspaceObservers.append(focusObserver)
         for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didActivateApplicationNotification] {

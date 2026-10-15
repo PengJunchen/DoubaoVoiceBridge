@@ -200,9 +200,6 @@ struct BridgeShortcutConfiguration: Equatable {
     func validationError(for doubao: DoubaoShortcutConfiguration) -> String? {
         guard doubao.mode.isSupported else { return "请先选择豆包支持的语音按键与开始方式" }
         if let error = doubao.shortcut?.doubaoValidationError { return error }
-        if kind == .followDoubao, doubao.shortcut != nil {
-            return "豆包使用自定义按键时，请点击“录制远控触发键”单独录制；自定义远控键按住开始、松开结束"
-        }
         if kind == .customHold {
             guard let shortcut else { return "请先录制远控触发键" }
             return shortcut.validationError
@@ -232,6 +229,18 @@ struct ShortcutProfile: Equatable {
         bridge.kind == .customHold
     }
 
+    var followsCustomDoubaoShortcut: Bool {
+        bridge.kind == .followDoubao && doubao.shortcut != nil
+    }
+
+    var usesCustomEventBridge: Bool {
+        usesCustomBridge || followsCustomDoubaoShortcut
+    }
+
+    var usesFollowCustomToggleBridge: Bool {
+        followsCustomDoubaoShortcut && doubao.mode == .fnToggle
+    }
+
     var bridgeShortcut: KeyboardShortcut {
         switch bridge.kind {
         case .followDoubao:
@@ -244,7 +253,10 @@ struct ShortcutProfile: Equatable {
     }
 
     var customBridgeIsSupported: Bool {
-        usesCustomBridge && bridge.shortcut != nil && bridge.shortcut?.validationError == nil
+        if usesCustomBridge {
+            return bridge.shortcut != nil && bridge.shortcut?.validationError == nil
+        }
+        return followsCustomDoubaoShortcut && doubao.shortcut?.validationError == nil
     }
 
     var supportsManualComposerEntry: Bool {
@@ -253,11 +265,21 @@ struct ShortcutProfile: Equatable {
 
     var bridgeInstruction: String {
         if usesFnBridge { return "按 Fn 开始，再按任意键结束" }
+        if followsCustomDoubaoShortcut, doubao.mode == .fnToggle {
+            return "轻按 \(bridgeShortcut.displayName) 开始，再按任意键结束"
+        }
         return "按住 \(bridgeShortcut.displayName) 开始，松开结束"
     }
 
     var doubaoInstruction: String {
         doubao.shortcut == nil ? doubao.mode.instruction : doubao.instruction
+    }
+
+    var statusMenuLines: [String] {
+        [
+            "远控触发键：\(bridgeShortcut.displayName)（\(bridgeInstruction)）",
+            "豆包语音键：\(doubao.keyboardShortcut.displayName)（\(doubaoInstruction)）"
+        ]
     }
 
     static func hasSameTriggerBehavior(_ first: ShortcutProfile?, _ second: ShortcutProfile?) -> Bool {
@@ -271,11 +293,12 @@ enum ShortcutTriggerReadiness {
     static func status(
         profile: ShortcutProfile?,
         setupPending: Bool,
-        monitorActive: Bool
+        monitorActive: Bool,
+        accessibilityTrusted: Bool = true
     ) -> String? {
-        guard !setupPending, monitorActive,
+        guard !setupPending, monitorActive, accessibilityTrusted,
               let profile, profile.isSupported else { return nil }
-        return "就绪 · \(profile.bridgeInstruction)；豆包：\(profile.doubaoInstruction)"
+        return "就绪 · \(profile.statusMenuLines.joined(separator: "；"))"
     }
 }
 

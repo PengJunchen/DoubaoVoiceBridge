@@ -890,10 +890,26 @@ enum SelfTests {
                 false,
                 "custom Doubao bindings cannot open an unfinished manual composer session"
             )
+            let customFollow = ShortcutProfile(doubao: customDoubao, bridge: .followDoubao)
+            check(customFollow.isSupported, true, "follow mode accepts a recorded Doubao hold key")
+            check(customFollow.usesCustomEventBridge, true, "recorded follow keys use the generic physical trigger route")
+            check(customFollow.usesFollowCustomToggleBridge, false, "a recorded hold key keeps hold-and-release behavior")
+            check(customFollow.bridgeInstruction.contains("按住 ⌃⇧K"), true, "followed custom hold displays its actual key and interaction")
+
+            let rightOptionFollow = ShortcutProfile(
+                doubao: DoubaoShortcutConfiguration.manual(.fnToggle, shortcut: KeyboardShortcut(keyCode: 61)),
+                bridge: .followDoubao
+            )
+            check(rightOptionFollow.isSupported, true, "Right Option Fn-toggle can be followed by the remote bridge")
+            check(rightOptionFollow.usesFollowCustomToggleBridge, true, "a followed custom toggle has click-to-start behavior")
+            check(rightOptionFollow.bridgeInstruction.contains("轻按 Right ⌥"), true, "followed toggle status names Right Option")
             check(
-                ShortcutProfile(doubao: customDoubao, bridge: .followDoubao).isSupported,
-                false,
-                "custom Doubao key cannot silently become the remote toggle trigger"
+                rightOptionFollow.statusMenuLines,
+                [
+                    "远控触发键：Right ⌥（轻按 Right ⌥ 开始，再按任意键结束）",
+                    "豆包语音键：Right ⌥（按 Right ⌥ 启动，任意键结束）"
+                ],
+                "status menu separately labels the remote trigger and Doubao voice key"
             )
 
             let doubao = DoubaoShortcutConfiguration(
@@ -1019,8 +1035,18 @@ enum SelfTests {
             )
             check(
                 ShortcutTriggerReadiness.status(profile: controlProfile, setupPending: false, monitorActive: true),
-                "就绪 · 按住 Left ⌃ 开始，松开结束；豆包：长按左 ⌃ 说话，松开自动发送",
+                "就绪 · 远控触发键：Left ⌃（按住 Left ⌃ 开始，松开结束）；豆包语音键：Left ⌃（长按左 ⌃ 说话，松开自动发送）",
                 "readiness is published only for a supported profile with an active event tap"
+            )
+            check(
+                ShortcutTriggerReadiness.status(
+                    profile: controlProfile,
+                    setupPending: false,
+                    monitorActive: true,
+                    accessibilityTrusted: false
+                ),
+                nil,
+                "readiness is withheld when the app cannot safely capture the UU window"
             )
 
             let unsupportedProfile = ShortcutProfile(
@@ -1052,6 +1078,210 @@ enum SelfTests {
                 modifierMask: CGEventFlags.maskControl.rawValue | CGEventFlags.maskShift.rawValue
             )
             let controlK = KeyboardShortcut(keyCode: 40, modifierMask: CGEventFlags.maskControl.rawValue)
+
+            let rightOptionFollowProfile = ShortcutProfile(
+                doubao: DoubaoShortcutConfiguration.manual(.fnToggle, shortcut: KeyboardShortcut(keyCode: 61)),
+                bridge: .followDoubao
+            )
+            let rightOptionFollow = ControlMonitorEventHarness(profile: rightOptionFollowProfile)
+            check(rightOptionFollow.sendModifier(61, flags: .maskAlternate), true, "followed Right Option down is intercepted as the remote toggle trigger")
+            check(rightOptionFollow.beginCount, 0, "followed Right Option waits for its click release before opening the composer")
+            check(rightOptionFollow.sendModifier(61, flags: []), true, "followed Right Option release is consumed")
+            check(rightOptionFollow.beginCount, 1, "Right Option click enters the production composer-start route exactly once")
+            rightOptionFollow.composerReady = true
+            rightOptionFollow.monitor.postSyntheticDownIfNeeded()
+            check(
+                rightOptionFollow.postedShortcuts,
+                [.init(shortcut: KeyboardShortcut(keyCode: 61), down: true)],
+                "the followed Right Option click synthesizes the configured Doubao key only after composer readiness"
+            )
+            RunLoop.main.run(until: Date().addingTimeInterval(0.08))
+            check(
+                rightOptionFollow.postedShortcuts,
+                [
+                    .init(shortcut: KeyboardShortcut(keyCode: 61), down: true),
+                    .init(shortcut: KeyboardShortcut(keyCode: 61), down: false)
+                ],
+                "the synthetic Right Option press is paired with its release"
+            )
+            check(rightOptionFollow.sendKey(40, down: true, flags: []), true, "the next physical key is consumed as the any-key stop")
+            check(rightOptionFollow.anyKeyStopCount, 1, "the followed toggle closes Doubao with a local any-key stop")
+            check(rightOptionFollow.releaseCount, 1, "the followed toggle reaches the normal transcript-finalization callback")
+            _ = rightOptionFollow.sendKey(40, down: false, flags: [])
+            check(rightOptionFollow.monitor.isGestureIdle, true, "followed Right Option trigger and stop release return the monitor to idle")
+            rightOptionFollow.monitor.stop()
+
+            let chordFollowProfile = ShortcutProfile(
+                doubao: DoubaoShortcutConfiguration.manual(.fnToggle, shortcut: controlShiftChord),
+                bridge: .followDoubao
+            )
+            let chordFollow = ControlMonitorEventHarness(profile: chordFollowProfile)
+            _ = chordFollow.sendModifier(59, flags: .maskControl)
+            _ = chordFollow.sendModifier(56, flags: [.maskControl, .maskShift])
+            check(
+                chordFollow.sendKey(40, down: true, flags: [.maskControl, .maskShift]),
+                true,
+                "followed chord primary-down is captured after its modifier prefix"
+            )
+            check(
+                chordFollow.sendKey(40, down: false, flags: [.maskControl, .maskShift]),
+                true,
+                "followed chord primary-up starts the local composer"
+            )
+            check(chordFollow.beginCount, 1, "the followed chord enters the production start route once")
+            chordFollow.composerReady = true
+            chordFollow.monitor.postSyntheticDownIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.08))
+            check(
+                chordFollow.postedShortcuts,
+                [
+                    .init(shortcut: controlShiftChord, down: true),
+                    .init(shortcut: controlShiftChord, down: false)
+                ],
+                "followed chord is synthesized only to the ready local composer"
+            )
+            check(chordFollow.sendModifier(56, flags: .maskControl), true, "the original Shift release is swallowed after chord activation")
+            check(chordFollow.sendModifier(59, flags: []), true, "the original Control release is swallowed after chord activation")
+            check(chordFollow.anyKeyStopCount, 0, "releasing the chord modifiers does not stop followed toggle dictation")
+            check(chordFollow.releaseCount, 0, "modifier releases do not finalize the followed chord session")
+            check(chordFollow.sendModifier(59, flags: .maskControl), true, "a later modifier-down ends followed toggle dictation")
+            check(chordFollow.anyKeyStopCount, 1, "the later modifier-down is translated into the local any-key stop")
+            check(chordFollow.releaseCount, 1, "the chord session finalizes exactly once after the later stop")
+            check(chordFollow.sendModifier(59, flags: []), true, "the stop modifier release is consumed without toggling state twice")
+            chordFollow.monitor.stop()
+
+            let followedHoldProfile = ShortcutProfile(
+                doubao: DoubaoShortcutConfiguration.manual(.leftControlHold, shortcut: KeyboardShortcut(keyCode: 61)),
+                bridge: .followDoubao
+            )
+            let followedHold = ControlMonitorEventHarness(profile: followedHoldProfile)
+            _ = followedHold.sendModifier(61, flags: .maskAlternate)
+            check(followedHold.beginCount, 0, "followed custom hold does not begin before its threshold")
+            followedHold.monitor.activateDictationIfStillPending()
+            check(followedHold.beginCount, 1, "followed custom hold starts through the production threshold route")
+            followedHold.monitor.stop()
+
+            let failedCapture = ControlMonitorEventHarness(shortcut: .fn)
+            failedCapture.windowCaptureSucceeds = false
+            check(failedCapture.sendModifier(63, flags: .maskSecondaryFn), false, "a trigger with no capturable UU window remains native")
+            check(failedCapture.beginCount, 0, "failed UU window capture never opens the composer")
+            check(
+                failedCapture.unavailableMessages.last?.contains("辅助功能权限") ?? false,
+                true,
+                "failed UU window capture reports actionable accessibility guidance"
+            )
+            failedCapture.monitor.stop()
+
+            let startupRace = ControlMonitorEventHarness(profile: ShortcutProfile(
+                doubao: DoubaoShortcutConfiguration.manual(.fnToggle, shortcut: KeyboardShortcut(keyCode: 61)),
+                bridge: .customHold(.fn)
+            ))
+            _ = startupRace.sendModifier(63, flags: .maskSecondaryFn)
+            startupRace.monitor.activateDictationIfStillPending()
+            check(startupRace.beginCount, 1, "custom Fn hold enters the production composer-start route")
+            startupRace.uuIsFrontmost = false
+            startupRace.bridgeHasFocus = false
+            startupRace.monitor.cancelIfFocusLost(
+                activatedBundleIdentifier: "com.lyp.DoubaoVoiceBridge",
+                at: Date().addingTimeInterval(0.031)
+            )
+            check(startupRace.cancelCount, 0, "the own-app activation transition does not cancel within the readiness deadline")
+            startupRace.bridgeHasFocus = true
+            startupRace.composerReady = true
+            startupRace.monitor.postSyntheticDownIfNeeded()
+            check(
+                startupRace.postedShortcuts.first,
+                .init(shortcut: KeyboardShortcut(keyCode: 61), down: true),
+                "after the focus transition, the ready composer receives only the configured Right Option key"
+            )
+            startupRace.bridgeHasFocus = false
+            startupRace.monitor.cancelIfFocusLost(activatedBundleIdentifier: "com.apple.Safari")
+            check(startupRace.cancelCount, 1, "focus loss after first composer readiness cancels immediately")
+            startupRace.monitor.stop()
+
+            let legacyStartup = ControlMonitorEventHarness(profile: ShortcutProfile(
+                doubao: DoubaoShortcutConfiguration(mode: .leftControlHold, source: .manual, observedAt: Date()),
+                bridge: .followDoubao
+            ))
+            check(legacyStartup.profile.usesLeftControlBridge, true, "legacy startup fixture exercises the historic left-Control bridge route")
+            check(legacyStartup.profile.usesCustomEventBridge, false, "legacy startup fixture does not enter the custom-key event route")
+            check(legacyStartup.sendModifier(59, flags: .maskControl), true, "legacy left Control enters the same production gesture route")
+            legacyStartup.monitor.activateDictationIfStillPending()
+            check(legacyStartup.beginCount, 1, "legacy left Control reaches composer startup after its hold threshold")
+            legacyStartup.uuIsFrontmost = false
+            legacyStartup.bridgeHasFocus = false
+            legacyStartup.monitor.cancelIfFocusLost(
+                activatedBundleIdentifier: "com.lyp.DoubaoVoiceBridge",
+                at: Date().addingTimeInterval(0.031)
+            )
+            check(legacyStartup.cancelCount, 0, "legacy left Control also gets the bounded own-app activation transition")
+            legacyStartup.bridgeHasFocus = true
+            legacyStartup.composerReady = true
+            legacyStartup.monitor.postSyntheticDownIfNeeded()
+            check(
+                legacyStartup.postedShortcuts.first,
+                .init(shortcut: KeyboardShortcut(keyCode: 59), down: true),
+                "legacy startup synthesizes its configured voice key only after the local composer is ready"
+            )
+            legacyStartup.bridgeHasFocus = false
+            legacyStartup.monitor.cancelIfFocusLost(activatedBundleIdentifier: "com.apple.Safari")
+            check(legacyStartup.cancelCount, 1, "legacy left Control returns to strict focus cancellation after first readiness")
+            check(
+                legacyStartup.postedShortcuts.last,
+                .init(shortcut: KeyboardShortcut(keyCode: 59), down: false),
+                "legacy focus cancellation balances the synthetic voice key without sending it to Safari"
+            )
+            legacyStartup.monitor.stop()
+
+            let startupWindowChanged = ControlMonitorEventHarness(shortcut: .fn)
+            _ = startupWindowChanged.sendModifier(63, flags: .maskSecondaryFn)
+            startupWindowChanged.monitor.activateDictationIfStillPending()
+            startupWindowChanged.uuIsFrontmost = false
+            startupWindowChanged.bridgeHasFocus = false
+            startupWindowChanged.windowMatches = false
+            startupWindowChanged.monitor.cancelIfFocusLost(
+                activatedBundleIdentifier: "com.lyp.DoubaoVoiceBridge",
+                at: Date().addingTimeInterval(0.031)
+            )
+            check(startupWindowChanged.cancelCount, 1, "startup grace never crosses a change in the captured UU window")
+            check(startupWindowChanged.postedShortcuts, [], "a changed UU window receives no synthetic voice shortcut")
+            startupWindowChanged.monitor.stop()
+
+            let startupExternalSwitch = ControlMonitorEventHarness(shortcut: .fn)
+            _ = startupExternalSwitch.sendModifier(63, flags: .maskSecondaryFn)
+            startupExternalSwitch.monitor.activateDictationIfStillPending()
+            startupExternalSwitch.uuIsFrontmost = false
+            startupExternalSwitch.bridgeHasFocus = false
+            startupExternalSwitch.monitor.cancelIfFocusLost(
+                activatedBundleIdentifier: "com.apple.Safari",
+                at: Date().addingTimeInterval(0.031)
+            )
+            check(startupExternalSwitch.cancelCount, 1, "an explicit external app switch cancels during startup grace")
+            check(startupExternalSwitch.postedShortcuts, [], "an external app switch receives no synthetic voice shortcut")
+            startupExternalSwitch.monitor.stop()
+
+            let startupExpired = ControlMonitorEventHarness(shortcut: .fn)
+            _ = startupExpired.sendModifier(63, flags: .maskSecondaryFn)
+            startupExpired.monitor.activateDictationIfStillPending()
+            startupExpired.uuIsFrontmost = false
+            startupExpired.bridgeHasFocus = false
+            startupExpired.monitor.cancelIfFocusLost(
+                activatedBundleIdentifier: "com.lyp.DoubaoVoiceBridge",
+                at: Date().addingTimeInterval(2)
+            )
+            check(startupExpired.cancelCount, 1, "the composer activation grace is bounded by its readiness deadline")
+            check(startupExpired.postedShortcuts, [], "a timed-out composer receives no synthetic voice shortcut")
+            startupExpired.monitor.stop()
+
+            let startupInput = ControlMonitorEventHarness(shortcut: .fn)
+            _ = startupInput.sendModifier(63, flags: .maskSecondaryFn)
+            startupInput.monitor.activateDictationIfStillPending()
+            startupInput.uuIsFrontmost = false
+            startupInput.bridgeHasFocus = false
+            _ = startupInput.sendKey(40, down: true, flags: [])
+            check(startupInput.cancelCount, 1, "physical key input before composer readiness cancels startup")
+            check(startupInput.postedShortcuts, [], "physical input before composer readiness is never synthesized into another app")
+            startupInput.monitor.stop()
 
             let mismatch = ControlMonitorEventHarness(shortcut: controlK)
             check(mismatch.sendModifier(59, flags: .maskControl), true, "custom chord buffers its Control prefix")
@@ -1238,28 +1468,43 @@ private final class ControlMonitorEventHarness {
         let summary: Summary
     }
 
+    struct PostedShortcut: Equatable {
+        let shortcut: KeyboardShortcut
+        let down: Bool
+    }
+
     let source = CGEventSource(stateID: .combinedSessionState)!
     let target = UURemoteTarget(application: NSRunningApplication.current)
     let profile: ShortcutProfile
     var windowMatches = true
+    var windowCaptureSucceeds = true
+    var uuIsFrontmost = true
+    var bridgeHasFocus = true
+    var composerReady = false
     var captureCount = 0
     var beginCount = 0
+    var cancelCount = 0
+    var releaseCount = 0
+    var anyKeyStopCount = 0
+    var postedShortcuts: [PostedShortcut] = []
     var replayed: [RecordedEvent] = []
+    var unavailableMessages: [String] = []
 
     lazy var monitor: ControlHoldMonitor = {
         ControlHoldMonitor(
             profile: profile,
             holdThreshold: 0.25,
-            targetProvider: { self.target },
+            targetProvider: { self.uuIsFrontmost ? self.target : nil },
             targetProviderDiagnostic: { "self-test" },
-            targetIsActive: { _ in true },
-            localComposerReady: { false },
+            targetIsActive: { _ in self.uuIsFrontmost || self.bridgeHasFocus },
+            localComposerReady: { self.composerReady },
             onBegin: { _, _ in self.beginCount += 1 },
             onFnToggleMayBeActive: {},
-            onRelease: {},
-            onCancel: {},
+            onRelease: { self.releaseCount += 1 },
+            onCancel: { self.cancelCount += 1 },
+            onTriggerUnavailable: { self.unavailableMessages.append($0) },
             customTargetWindowMatches: { _ in self.windowMatches },
-            customTargetWindowCapture: { _ in self.captureCount += 1; return true },
+            customTargetWindowCapture: { _ in self.captureCount += 1; return self.windowCaptureSucceeds },
             customEventReplay: { _, event in
                 self.replayed.append(RecordedEvent(summary: Summary(
                     type: event.type,
@@ -1267,16 +1512,24 @@ private final class ControlMonitorEventHarness {
                     flags: event.flags.rawValue
                 )))
             },
-            syntheticKeyboardEventPoster: { _, _ in true },
-            bridgeApplicationOwnsFocus: { true }
+            syntheticKeyboardEventPoster: { shortcut, down in
+                self.postedShortcuts.append(PostedShortcut(shortcut: shortcut, down: down))
+                return true
+            },
+            syntheticAnyKeyEventPoster: { self.anyKeyStopCount += 1; return true },
+            bridgeApplicationOwnsFocus: { self.bridgeHasFocus }
         )
     }()
 
-    init(shortcut: KeyboardShortcut) {
-        profile = ShortcutProfile(
+    convenience init(shortcut: KeyboardShortcut) {
+        self.init(profile: ShortcutProfile(
             doubao: DoubaoShortcutConfiguration(mode: .leftControlHold, source: .manual, observedAt: Date()),
             bridge: .customHold(shortcut)
-        )
+        ))
+    }
+
+    init(profile: ShortcutProfile) {
+        self.profile = profile
     }
 
     @discardableResult
