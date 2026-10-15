@@ -31,6 +31,13 @@ final class ComposerTextView: NSTextView {
     var observesControlRelease = false
 
     override func keyDown(with event: NSEvent) {
+        if event.cgEvent?.getIntegerValueField(.eventSourceUserData) == ControlHoldMonitor.syntheticEventMarker {
+            // The input method sees the posted event before it reaches this
+            // local responder. Do not send the synthetic voice shortcut into
+            // NSTextView's editing commands or text insertion path: a later
+            // rollback could erase text committed by an input method inline.
+            return
+        }
         let isReturn = event.keyCode == 36 || event.keyCode == 76
         let disallowedModifiers: NSEvent.ModifierFlags = [.command, .control, .option]
         if isReturn,
@@ -49,6 +56,8 @@ final class ComposerTextView: NSTextView {
     }
 
     override func flagsChanged(with event: NSEvent) {
+        let isSynthetic = event.cgEvent?.getIntegerValueField(.eventSourceUserData) == ControlHoldMonitor.syntheticEventMarker
+        guard !isSynthetic else { return }
         super.flagsChanged(with: event)
         if observesControlRelease, event.keyCode == 59, !event.modifierFlags.contains(.control) {
             onControlReleased?()

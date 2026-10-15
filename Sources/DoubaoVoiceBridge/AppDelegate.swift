@@ -268,7 +268,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         target.captureFocusedWindow()
-        coordinator.begin(target: target, profile: shortcutProfile)
+        coordinator.begin(target: target, profile: shortcutProfile, manualEntry: true)
     }
 
     @objc private func openShortcutSettingsFromMenu() {
@@ -306,7 +306,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.onOpenLocalTest = { [weak self] in
             self?.openTextEditForLocalTest()
         }
-        controller.onSave = { [weak self] selectedConfiguration, manualMode, bridge in
+        controller.onSave = { [weak self] selectedConfiguration, manualMode, manualShortcut, bridge in
             guard let self else { return .failure(.message("应用已关闭，请重新打开设置。")) }
             guard self.coordinator.canBegin, self.monitor?.isGestureIdle != false else {
                 self.setStatus("请先完成当前听写，再保存快捷键设置", isError: true)
@@ -315,6 +315,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let saved = self.shortcutStore.save(
                 confirmedDoubaoMode: selectedConfiguration.mode,
                 manualDoubaoMode: manualMode,
+                manualDoubaoShortcut: manualShortcut,
+                confirmedDoubaoShortcut: selectedConfiguration.shortcut,
                 bridge: bridge
             )
             guard saved else {

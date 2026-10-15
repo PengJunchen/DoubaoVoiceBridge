@@ -57,7 +57,12 @@ final class SessionCoordinator {
         activeShortcutProfile = profile
     }
 
-    func begin(target: UURemoteTarget, profile: ShortcutProfile) {
+    static func shouldObserveControlRelease(manualEntry: Bool, profile: ShortcutProfile) -> Bool {
+        manualEntry && profile.doubao.mode == .leftControlHold &&
+            profile.doubao.keyboardShortcut == .leftControl
+    }
+
+    func begin(target: UURemoteTarget, profile: ShortcutProfile, manualEntry: Bool = false) {
         guard (state == .idle || state == .failed),
               !deliveryAwaitingCleanup,
               !cancellationCleanupPending else {
@@ -72,7 +77,7 @@ final class SessionCoordinator {
         panel.begin(
             targetDescription: "发送到 UU 远控",
             shortcutInstruction: instruction,
-            observesControlRelease: profile.doubao.mode == .leftControlHold
+            observesControlRelease: Self.shouldObserveControlRelease(manualEntry: manualEntry, profile: profile)
         )
         onStatusChange?("正在听写…\(instruction)", false)
     }

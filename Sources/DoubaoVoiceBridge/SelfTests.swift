@@ -624,6 +624,118 @@ enum SelfTests {
         }
 
         do {
+            let f5WithFunctionFlag = NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: [.function],
+                timestamp: 0,
+                windowNumber: 0,
+                context: nil,
+                characters: "5",
+                charactersIgnoringModifiers: "5",
+                isARepeat: false,
+                keyCode: 96
+            )!
+            check(
+                ShortcutRecorderMonitorHandler.isPhysicalFnTransition(f5WithFunctionFlag),
+                false,
+                "AppKit function flag on F5 is not a physical Fn transition"
+            )
+            let physicalFnTransition = NSEvent.keyEvent(
+                with: .flagsChanged,
+                location: .zero,
+                modifierFlags: [.function],
+                timestamp: 0,
+                windowNumber: 0,
+                context: nil,
+                characters: "",
+                charactersIgnoringModifiers: "",
+                isARepeat: false,
+                keyCode: 63
+            )!
+            check(
+                ShortcutRecorderMonitorHandler.isPhysicalFnTransition(physicalFnTransition),
+                true,
+                "only keyCode 63 flagsChanged represents physical Fn"
+            )
+
+            var functionKeyState = ShortcutRecorderMonitorHandler.FunctionKeyState()
+            check(
+                functionKeyState.transition(isDown: true, hasOtherModifiers: false),
+                .waitingForRelease,
+                "Fn recording waits through the physical release"
+            )
+            functionKeyState.noteOtherModifierOrKey()
+            check(
+                functionKeyState.transition(isDown: false, hasOtherModifiers: false),
+                .rejectedCombination,
+                "Fn plus a modifier is rejected after observing the full chord"
+            )
+            check(
+                functionKeyState.transition(isDown: true, hasOtherModifiers: false),
+                .waitingForRelease,
+                "a fresh standalone Fn attempt can follow a rejected chord"
+            )
+            check(
+                functionKeyState.transition(isDown: false, hasOtherModifiers: false),
+                .accepted,
+                "standalone Fn is accepted on release"
+            )
+
+            let recorderEvent = NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: 0,
+                context: nil,
+                characters: "q",
+                charactersIgnoringModifiers: "q",
+                isARepeat: false,
+                keyCode: 12
+            )!
+            var consumeCalled = false
+            let keyWindowHandler = ShortcutRecorderMonitorHandler.make(
+                windowIsKey: { true },
+                stop: {},
+                consume: { _ in consumeCalled = true; return nil }
+            )
+            let consumedResult = keyWindowHandler(recorderEvent)
+            check(consumedResult.map { _ in false } ?? true, true, "recorder local-monitor closure preserves intentional nil")
+            check(consumeCalled, true, "recorder local-monitor closure reaches its event consumer")
+
+            var stoppedAfterFocusLoss = false
+            let focusLostHandler = ShortcutRecorderMonitorHandler.make(
+                windowIsKey: { false },
+                stop: { stoppedAfterFocusLoss = true },
+                consume: { _ in nil }
+            )
+            check(focusLostHandler(recorderEvent) === recorderEvent, true, "focus loss forwards the current event")
+            check(stoppedAfterFocusLoss, true, "focus loss stops the recorder and removes its monitor")
+
+            let textView = ComposerTextView(frame: NSRect(x: 0, y: 0, width: 320, height: 80))
+            textView.string = "已有听写正文"
+            var commitCount = 0
+            textView.onCommit = { commitCount += 1 }
+            textView.observesControlRelease = true
+            var cancelCount = 0
+            textView.onCancel = { _ in cancelCount += 1 }
+            let syntheticSource = CGEventSource(stateID: .combinedSessionState)!
+            let syntheticLetter = CGEvent(keyboardEventSource: syntheticSource, virtualKey: 0, keyDown: true)!
+            syntheticLetter.setIntegerValueField(.eventSourceUserData, value: ControlHoldMonitor.syntheticEventMarker)
+            textView.keyDown(with: NSEvent(cgEvent: syntheticLetter)!)
+            check(textView.string, "已有听写正文", "marked synthetic voice key cannot overwrite existing composer text")
+            let syntheticReturn = CGEvent(keyboardEventSource: syntheticSource, virtualKey: 36, keyDown: true)!
+            syntheticReturn.setIntegerValueField(.eventSourceUserData, value: ControlHoldMonitor.syntheticEventMarker)
+            textView.keyDown(with: NSEvent(cgEvent: syntheticReturn)!)
+            check(commitCount, 0, "marked synthetic voice Return cannot commit the composer")
+            let syntheticEscape = CGEvent(keyboardEventSource: syntheticSource, virtualKey: 53, keyDown: true)!
+            syntheticEscape.setIntegerValueField(.eventSourceUserData, value: ControlHoldMonitor.syntheticEventMarker)
+            textView.keyDown(with: NSEvent(cgEvent: syntheticEscape)!)
+            check(cancelCount, 0, "marked synthetic voice Escape cannot cancel the composer")
+        }
+
+        do {
             let scrollView = NSScrollView(frame: .zero)
             let textView = NSTextView()
             textView.textContainerInset = NSSize(width: 12, height: 10)
@@ -658,6 +770,98 @@ enum SelfTests {
             let store = ShortcutConfigurationStore(defaults: defaults)
             check(store.didCompleteSetup, false, "first run starts without a completed setup record")
 
+            let controlShiftK = KeyboardShortcut(
+                keyCode: 40,
+                modifierMask: CGEventFlags.maskControl.rawValue | CGEventFlags.maskShift.rawValue
+            )
+            check(controlShiftK.validationError, nil, "ordinary modifier chords can be recorded")
+            check(KeyboardShortcut(keyCode: 62).isModifierOnly, true, "right Control can be recorded alone")
+            check(KeyboardShortcut(keyCode: 53).validationError != nil, true, "Escape remains reserved")
+            check(
+                KeyboardShortcut(keyCode: 63, modifierMask: CGEventFlags.maskCommand.rawValue).validationError != nil,
+                true,
+                "Fn cannot be combined with another modifier"
+            )
+            let expectedChordDown: [SyntheticKeyboardEventDescription] = [
+                .init(kind: .flagsChanged, keyCode: 59, flags: CGEventFlags.maskControl.rawValue),
+                .init(
+                    kind: .flagsChanged,
+                    keyCode: 56,
+                    flags: CGEventFlags.maskControl.rawValue | CGEventFlags.maskShift.rawValue
+                ),
+                .init(
+                    kind: .keyDown,
+                    keyCode: 40,
+                    flags: CGEventFlags.maskControl.rawValue | CGEventFlags.maskShift.rawValue
+                )
+            ]
+            check(
+                SyntheticKeyboardShortcutPlan.events(for: controlShiftK, down: true),
+                expectedChordDown,
+                "synthetic custom chord presses modifiers before its primary key"
+            )
+            let expectedChordUp: [SyntheticKeyboardEventDescription] = [
+                .init(
+                    kind: .keyUp,
+                    keyCode: 40,
+                    flags: CGEventFlags.maskControl.rawValue | CGEventFlags.maskShift.rawValue
+                ),
+                .init(kind: .flagsChanged, keyCode: 56, flags: CGEventFlags.maskControl.rawValue),
+                .init(kind: .flagsChanged, keyCode: 59, flags: 0)
+            ]
+            check(
+                SyntheticKeyboardShortcutPlan.events(for: controlShiftK, down: false),
+                expectedChordUp,
+                "synthetic custom chord releases its primary before balancing modifiers"
+            )
+            check(
+                SyntheticKeyboardShortcutPlan.events(for: KeyboardShortcut(keyCode: 62), down: true),
+                [.init(kind: .flagsChanged, keyCode: 62, flags: CGEventFlags.maskControl.rawValue)],
+                "right Control uses its own modifier keycode"
+            )
+
+            let customDoubao = DoubaoShortcutConfiguration.manual(.leftControlHold, shortcut: controlShiftK)
+            let remoteLeftControl = ShortcutProfile(doubao: customDoubao, bridge: .leftControlHold)
+            check(remoteLeftControl.isSupported, true, "custom Doubao chord works with the independent left-Control bridge")
+            check(remoteLeftControl.bridgeShortcut, .leftControl, "left-Control remote trigger remains independent of Doubao chord")
+            let remoteCustom = ShortcutProfile(
+                doubao: DoubaoShortcutConfiguration.manual(.leftControlHold, shortcut: KeyboardShortcut(keyCode: 62)),
+                bridge: .customHold(KeyboardShortcut(keyCode: 40))
+            )
+            check(remoteCustom.isSupported, true, "right-Control Doubao hold works with a custom remote trigger")
+            check(remoteCustom.bridgeShortcut, KeyboardShortcut(keyCode: 40), "custom remote binding is selected")
+            let customReadiness = ShortcutTriggerReadiness.status(
+                profile: remoteCustom,
+                setupPending: false,
+                monitorActive: true
+            ) ?? ""
+            check(
+                customReadiness.contains(remoteCustom.bridgeShortcut.displayName) &&
+                    customReadiness.contains(remoteCustom.doubao.keyboardShortcut.displayName),
+                true,
+                "custom status text names the configured remote and Doubao keys"
+            )
+            check(
+                SessionCoordinator.shouldObserveControlRelease(manualEntry: false, profile: controlProfileForReleaseTest()),
+                false,
+                "a monitor-triggered session ignores unrelated local left-Control releases"
+            )
+            check(
+                SessionCoordinator.shouldObserveControlRelease(manualEntry: false, profile: remoteCustom),
+                false,
+                "custom remote sessions never use the fixed left-Control composer release"
+            )
+            check(
+                SessionCoordinator.shouldObserveControlRelease(manualEntry: true, profile: remoteCustom),
+                false,
+                "custom Doubao bindings cannot open an unfinished manual composer session"
+            )
+            check(
+                ShortcutProfile(doubao: customDoubao, bridge: .followDoubao).isSupported,
+                false,
+                "custom Doubao key cannot silently become the remote toggle trigger"
+            )
+
             let doubao = DoubaoShortcutConfiguration(
                 mode: .fnToggle,
                 source: .visibleSettingsWindow,
@@ -676,9 +880,66 @@ enum SelfTests {
             check(store.hasCorruptOrIncompleteSavedConfiguration, false, "complete valid setup is accepted")
 
             store.updateConfirmedModeFromAutomaticRead(.leftControlHold)
-            check(store.loadLastConfirmedDoubaoConfiguration()?.mode, .leftControlHold, "supported automatic mode changes refresh the saved snapshot")
-            check(store.loadBridgeConfiguration()?.kind, .leftControlHold, "automatic Doubao change preserves the independent bridge key")
+            check(store.loadLastConfirmedDoubaoConfiguration()?.mode, .leftControlHold, "automatic profile refresh changes the saved mode")
+            check(store.loadBridgeConfiguration()?.kind, .leftControlHold, "automatic mode refresh preserves the independent bridge key")
             check(store.loadManualDoubaoConfiguration(), nil, "automatic refresh does not create a manual override")
+
+            let customRemoteKey = KeyboardShortcut(keyCode: 40, modifierMask: CGEventFlags.maskCommand.rawValue)
+            check(
+                store.save(
+                    confirmedDoubaoMode: .leftControlHold,
+                    manualDoubaoMode: .leftControlHold,
+                    manualDoubaoShortcut: controlShiftK,
+                    confirmedDoubaoShortcut: controlShiftK,
+                    bridge: .customHold(customRemoteKey)
+                ),
+                true,
+                "custom Doubao and remote bindings persist with readback validation"
+            )
+            check(store.loadManualDoubaoConfiguration()?.keyboardShortcut, controlShiftK, "manual Doubao chord reads back intact")
+            check(store.loadLastConfirmedDoubaoConfiguration()?.keyboardShortcut, controlShiftK, "confirmed Doubao chord reads back intact")
+            check(store.loadBridgeConfiguration()?.shortcut, customRemoteKey, "custom remote shortcut reads back intact")
+            check(store.hasCorruptOrIncompleteSavedConfiguration, false, "complete custom configuration is accepted")
+
+            let confirmedDomain = "DoubaoVoiceBridgeConfirmedCustomSelfTest.\(UUID().uuidString)"
+            let confirmedDefaults = UserDefaults(suiteName: confirmedDomain)!
+            confirmedDefaults.removePersistentDomain(forName: confirmedDomain)
+            defer { confirmedDefaults.removePersistentDomain(forName: confirmedDomain) }
+            let confirmedStore = ShortcutConfigurationStore(defaults: confirmedDefaults)
+            let customDoubaoKey = KeyboardShortcut(
+                keyCode: 40,
+                modifierMask: CGEventFlags.maskControl.rawValue | CGEventFlags.maskShift.rawValue
+            )
+            let remoteKey = KeyboardShortcut(keyCode: 97)
+            check(
+                confirmedStore.save(
+                    confirmedDoubaoMode: .leftControlHold,
+                    manualDoubaoMode: .leftControlHold,
+                    manualDoubaoShortcut: customDoubaoKey,
+                    confirmedDoubaoShortcut: customDoubaoKey,
+                    bridge: .customHold(remoteKey)
+                ),
+                true,
+                "choosing a confirmed custom Doubao key preserves it as an explicit override"
+            )
+            confirmedStore.updateConfirmedModeFromAutomaticRead(.fnToggle)
+            check(
+                confirmedStore.loadLastConfirmedDoubaoConfiguration()?.keyboardShortcut,
+                customDoubaoKey,
+                "a later automatic legacy read cannot replace the explicitly selected confirmed custom key"
+            )
+            let resolvedCustom = confirmedStore.loadManualDoubaoConfiguration() ??
+                confirmedStore.loadLastConfirmedDoubaoConfiguration()
+            check(
+                resolvedCustom?.keyboardShortcut,
+                customDoubaoKey,
+                "store-to-refresh resolution keeps the custom voice key active across automatic refresh"
+            )
+
+            store.updateConfirmedModeFromAutomaticRead(.fnToggle)
+            check(store.loadLastConfirmedDoubaoConfiguration()?.mode, .leftControlHold, "automatic legacy reads cannot override an explicitly selected custom shortcut")
+            check(store.loadBridgeConfiguration()?.kind, .customHold, "automatic reads preserve an explicitly selected custom remote key")
+            check(store.loadManualDoubaoConfiguration()?.keyboardShortcut, controlShiftK, "explicit custom voice key remains a manual override")
 
             defaults.set("unknown-v99", forKey: "shortcut.manualDoubaoMode.v1")
             check(store.loadManualDoubaoConfiguration(), nil, "unknown manual profile is not interpreted")
@@ -724,7 +985,7 @@ enum SelfTests {
             )
             check(
                 ShortcutTriggerReadiness.status(profile: controlProfile, setupPending: false, monitorActive: true),
-                "就绪 · 长按左 Control 开始，松开结束；豆包：长按左 ⌃ 说话，松开自动发送",
+                "就绪 · 按住 Left ⌃ 开始，松开结束；豆包：长按左 ⌃ 说话，松开自动发送",
                 "readiness is published only for a supported profile with an active event tap"
             )
 
@@ -751,13 +1012,265 @@ enum SelfTests {
             check(SyntheticShortcutEventFlags.fnToggle(down: false), [], "synthetic Doubao Fn up clears all modifiers")
         }
 
+        do {
+            let controlShiftChord = KeyboardShortcut(
+                keyCode: 40,
+                modifierMask: CGEventFlags.maskControl.rawValue | CGEventFlags.maskShift.rawValue
+            )
+            let controlK = KeyboardShortcut(keyCode: 40, modifierMask: CGEventFlags.maskControl.rawValue)
+
+            let mismatch = ControlMonitorEventHarness(shortcut: controlK)
+            check(mismatch.sendModifier(59, flags: .maskControl), true, "custom chord buffers its Control prefix")
+            check(mismatch.sendKey(1, down: true, flags: .maskControl), false, "a nonmatching key replays the native prefix and passes through")
+            check(
+                mismatch.replayed.map(\.summary),
+                [.init(type: .flagsChanged, keyCode: 59, flags: CGEventFlags.maskControl.rawValue)],
+                "custom chord mismatch replays only the original modifier prefix"
+            )
+            mismatch.monitor.stop()
+
+            let quickModifierRelease = ControlMonitorEventHarness(shortcut: controlK)
+            _ = quickModifierRelease.sendModifier(59, flags: .maskControl)
+            _ = quickModifierRelease.sendKey(40, down: true, flags: .maskControl)
+            check(quickModifierRelease.sendModifier(59, flags: []), true, "quick custom hold consumes its matching modifier release")
+            check(
+                quickModifierRelease.replayed.map(\.summary),
+                [
+                    .init(type: .flagsChanged, keyCode: 59, flags: CGEventFlags.maskControl.rawValue),
+                    .init(type: .keyDown, keyCode: 40, flags: CGEventFlags.maskControl.rawValue),
+                    .init(type: .flagsChanged, keyCode: 59, flags: 0)
+                ],
+                "quick custom modifier release replays the complete down/down/up sequence in order"
+            )
+            quickModifierRelease.monitor.stop()
+
+            let quickPrimaryRelease = ControlMonitorEventHarness(shortcut: controlK)
+            _ = quickPrimaryRelease.sendModifier(59, flags: .maskControl)
+            _ = quickPrimaryRelease.sendKey(40, down: true, flags: .maskControl)
+            check(quickPrimaryRelease.sendKey(40, down: false, flags: .maskControl), true, "quick custom primary release is consumed")
+            check(
+                quickPrimaryRelease.replayed.map(\.summary),
+                [
+                    .init(type: .flagsChanged, keyCode: 59, flags: CGEventFlags.maskControl.rawValue),
+                    .init(type: .keyDown, keyCode: 40, flags: CGEventFlags.maskControl.rawValue),
+                    .init(type: .keyUp, keyCode: 40, flags: CGEventFlags.maskControl.rawValue)
+                ],
+                "quick custom primary release balances the buffered trigger without losing native typing"
+            )
+            quickPrimaryRelease.monitor.stop()
+
+            let neutralized = ControlMonitorEventHarness(shortcut: controlK)
+            _ = neutralized.sendModifier(59, flags: .maskControl)
+            _ = neutralized.sendKey(40, down: true, flags: .maskControl)
+            neutralized.monitor.activateDictationIfStillPending()
+            check(neutralized.beginCount, 1, "custom trigger reaches the production long-press activation path")
+            check(neutralized.sendModifier(56, flags: [.maskControl, .maskShift]), true, "extra Shift is reposted without the swallowed Control mask")
+            check(
+                neutralized.replayed.last?.summary,
+                .init(type: .flagsChanged, keyCode: 56, flags: CGEventFlags.maskShift.rawValue),
+                "custom hold strips swallowed Control from a later modifier event"
+            )
+            check(neutralized.sendMouseDown(flags: [.maskControl, .maskShift]), true, "mouse input is reposted without the swallowed Control mask")
+            check(
+                neutralized.replayed.last?.summary,
+                .init(type: .leftMouseDown, keyCode: 0, flags: CGEventFlags.maskShift.rawValue),
+                "custom hold strips swallowed Control from mouse events too"
+            )
+            neutralized.monitor.stop()
+
+            let lostFocus = ControlMonitorEventHarness(shortcut: controlK)
+            _ = lostFocus.sendModifier(59, flags: .maskControl)
+            lostFocus.windowMatches = false
+            check(lostFocus.sendKey(40, down: true, flags: .maskControl), true, "focus loss drops a buffered prefix instead of replaying into another app")
+            check(
+                lostFocus.replayed.last?.summary,
+                .init(type: .keyDown, keyCode: 40, flags: 0),
+                "focus loss removes the buffered Control mask from later key events"
+            )
+            check(lostFocus.sendModifier(59, flags: []), true, "orphaned Control release remains consumed after focus loss")
+            check(lostFocus.monitor.isGestureIdle, true, "focus-lost modifier state clears when its physical release arrives")
+            lostFocus.monitor.stop()
+
+            let changedTargetAtThreshold = ControlMonitorEventHarness(shortcut: controlK)
+            _ = changedTargetAtThreshold.sendModifier(59, flags: .maskControl)
+            _ = changedTargetAtThreshold.sendKey(40, down: true, flags: .maskControl)
+            changedTargetAtThreshold.windowMatches = false
+            changedTargetAtThreshold.monitor.activateDictationIfStillPending()
+            check(changedTargetAtThreshold.beginCount, 0, "custom long-press cancels when the captured UU window changes before threshold")
+            check(changedTargetAtThreshold.captureCount, 1, "custom threshold never recaptures a newly focused window")
+            check(changedTargetAtThreshold.monitor.isGestureIdle, false, "changed target keeps consumed modifiers neutralized until release")
+            _ = changedTargetAtThreshold.sendKey(40, down: false, flags: .maskControl)
+            _ = changedTargetAtThreshold.sendModifier(59, flags: [])
+            check(changedTargetAtThreshold.monitor.isGestureIdle, true, "changed-target modifier state clears after physical releases")
+            changedTargetAtThreshold.monitor.stop()
+
+            let fnCompanion = ControlMonitorEventHarness(shortcut: .fn)
+            check(fnCompanion.sendModifier(63, flags: .maskSecondaryFn), true, "custom Fn trigger begins from the physical Fn flags event")
+            check(fnCompanion.sendKey(179, down: true, flags: .maskSecondaryFn, sourcePID: 0), true, "Fn companion key 179 is suppressed by the custom trigger path")
+            check(fnCompanion.monitor.isGestureIdle, false, "Fn companion does not abort the pending custom Fn trigger")
+            fnCompanion.monitor.activateDictationIfStillPending()
+            check(fnCompanion.beginCount, 1, "custom Fn survives its companion event and reaches activation")
+            fnCompanion.monitor.stop()
+
+            let fnChord = ControlMonitorEventHarness(shortcut: .fn)
+            _ = fnChord.sendModifier(63, flags: .maskSecondaryFn)
+            check(
+                fnChord.sendModifier(59, flags: [.maskSecondaryFn, .maskControl]),
+                false,
+                "Fn plus Control aborts the custom Fn trigger and remains a native chord"
+            )
+            check(fnChord.beginCount, 0, "Fn plus Control cannot reach custom trigger activation")
+            check(
+                fnChord.sendKey(179, down: true, flags: [.maskSecondaryFn, .maskControl], sourcePID: 0),
+                false,
+                "aborted Fn chord disarms companion suppression so key 179 stays native"
+            )
+            fnChord.monitor.stop()
+
+            let functionKey = ControlMonitorEventHarness(shortcut: KeyboardShortcut(keyCode: 97))
+            check(functionKey.sendKey(97, down: true, flags: .maskSecondaryFn), true, "F6 keydown flag does not masquerade as a physical Fn chord")
+            check(functionKey.monitor.isGestureIdle, false, "F6 remains a usable custom remote trigger")
+            functionKey.monitor.stop()
+
+            let physicalFnChord = ControlMonitorEventHarness(shortcut: KeyboardShortcut(keyCode: 97))
+            _ = physicalFnChord.sendModifier(63, flags: .maskSecondaryFn)
+            check(physicalFnChord.sendKey(97, down: true, flags: .maskSecondaryFn), false, "actual physical Fn plus F6 is passed through as a chord")
+            check(physicalFnChord.beginCount, 0, "actual Fn plus another key cannot start a custom F6 trigger")
+            physicalFnChord.monitor.stop()
+
+            let cancelled = ControlMonitorEventHarness(shortcut: controlK)
+            _ = cancelled.sendModifier(59, flags: .maskControl)
+            _ = cancelled.sendKey(40, down: true, flags: .maskControl)
+            let escape = NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: 0,
+                context: nil,
+                characters: "\u{1b}",
+                charactersIgnoringModifiers: "\u{1b}",
+                isARepeat: false,
+                keyCode: 53
+            )!
+            cancelled.monitor.cancelActiveSession(event: ComposerInputEventMetadata(event: escape))
+            check(cancelled.replayed, [], "Escape cancellation discards a buffered shortcut without replaying it")
+            _ = cancelled.sendKey(40, down: false, flags: .maskControl)
+            _ = cancelled.sendModifier(59, flags: [])
+            check(cancelled.monitor.isGestureIdle, true, "cancelled custom keys drain their releases and return to idle")
+            cancelled.monitor.stop()
+
+            let tapInterrupted = ControlMonitorEventHarness(shortcut: controlK)
+            _ = tapInterrupted.sendModifier(59, flags: .maskControl)
+            let disabledEvent = CGEvent(source: tapInterrupted.source)!
+            _ = tapInterrupted.monitor.processEventForTesting(type: .tapDisabledByTimeout, event: disabledEvent)
+            check(tapInterrupted.monitor.isGestureIdle, false, "tap interruption retains an orphan mask until a physical release")
+            tapInterrupted.monitor.stop()
+            check(tapInterrupted.monitor.isGestureIdle, true, "stopping after tap interruption clears all custom interception state")
+
+            check(controlShiftChord.validationError, nil, "event-level chord cases use a valid configurable shortcut")
+        }
+
         if failures.isEmpty {
-            print("SELF_TEST_OK tests=13")
+            print("SELF_TEST_OK")
             return true
         }
         for failure in failures {
             fputs("SELF_TEST_FAILURE \(failure)\n", stderr)
         }
         return false
+    }
+
+    private static func controlProfileForReleaseTest() -> ShortcutProfile {
+        ShortcutProfile(
+            doubao: DoubaoShortcutConfiguration(
+                mode: .leftControlHold,
+                source: .manual,
+                observedAt: Date()
+            ),
+            bridge: .followDoubao
+        )
+    }
+}
+
+private final class ControlMonitorEventHarness {
+    struct Summary: Equatable {
+        let type: CGEventType
+        let keyCode: Int64
+        let flags: UInt64
+    }
+
+    struct RecordedEvent: Equatable {
+        let summary: Summary
+    }
+
+    let source = CGEventSource(stateID: .combinedSessionState)!
+    let target = UURemoteTarget(application: NSRunningApplication.current)
+    let profile: ShortcutProfile
+    var windowMatches = true
+    var captureCount = 0
+    var beginCount = 0
+    var replayed: [RecordedEvent] = []
+
+    lazy var monitor: ControlHoldMonitor = {
+        ControlHoldMonitor(
+            profile: profile,
+            holdThreshold: 0.25,
+            targetProvider: { self.target },
+            targetProviderDiagnostic: { "self-test" },
+            targetIsActive: { _ in true },
+            localComposerReady: { false },
+            onBegin: { _, _ in self.beginCount += 1 },
+            onFnToggleMayBeActive: {},
+            onRelease: {},
+            onCancel: {},
+            customTargetWindowMatches: { _ in self.windowMatches },
+            customTargetWindowCapture: { _ in self.captureCount += 1; return true },
+            customEventReplay: { _, event in
+                self.replayed.append(RecordedEvent(summary: Summary(
+                    type: event.type,
+                    keyCode: event.getIntegerValueField(.keyboardEventKeycode),
+                    flags: event.flags.rawValue
+                )))
+            },
+            syntheticKeyboardEventPoster: { _, _ in true },
+            bridgeApplicationOwnsFocus: { true }
+        )
+    }()
+
+    init(shortcut: KeyboardShortcut) {
+        profile = ShortcutProfile(
+            doubao: DoubaoShortcutConfiguration(mode: .leftControlHold, source: .manual, observedAt: Date()),
+            bridge: .customHold(shortcut)
+        )
+    }
+
+    @discardableResult
+    func sendModifier(_ keyCode: Int64, flags: CGEventFlags) -> Bool {
+        let event = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(keyCode), keyDown: true)!
+        event.type = .flagsChanged
+        event.flags = flags
+        return monitor.processEventForTesting(type: .flagsChanged, event: event)
+    }
+
+    @discardableResult
+    func sendKey(_ keyCode: Int64, down: Bool, flags: CGEventFlags, sourcePID: Int64? = nil) -> Bool {
+        let event = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(keyCode), keyDown: down)!
+        event.flags = flags
+        if let sourcePID { event.setIntegerValueField(.eventSourceUnixProcessID, value: sourcePID) }
+        let type: CGEventType = down ? .keyDown : .keyUp
+        return monitor.processEventForTesting(type: type, event: event)
+    }
+
+    @discardableResult
+    func sendMouseDown(flags: CGEventFlags) -> Bool {
+        let event = CGEvent(
+            mouseEventSource: source,
+            mouseType: .leftMouseDown,
+            mouseCursorPosition: .zero,
+            mouseButton: .left
+        )!
+        event.flags = flags
+        return monitor.processEventForTesting(type: .leftMouseDown, event: event)
     }
 }

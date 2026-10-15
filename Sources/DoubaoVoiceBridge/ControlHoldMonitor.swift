@@ -25,6 +25,11 @@ final class ControlHoldMonitor {
     private let targetProviderDiagnostic: () -> String
     private let targetIsActive: (UURemoteTarget) -> Bool
     private let localComposerReady: () -> Bool
+    private let customTargetWindowMatches: ((UURemoteTarget) -> Bool)?
+    private let customTargetWindowCapture: ((UURemoteTarget) -> Bool)?
+    private let customEventReplay: ((CGEventTapProxy, CGEvent) -> Void)?
+    private let syntheticKeyboardEventPoster: ((KeyboardShortcut, Bool) -> Bool)?
+    private let bridgeApplicationOwnsFocus: () -> Bool
     private let onBegin: (UURemoteTarget, ShortcutProfile) -> Void
     private let onFnToggleMayBeActive: () -> Void
     private let onRelease: () -> Void
@@ -42,6 +47,8 @@ final class ControlHoldMonitor {
     private var syntheticFnTapReleaseWorkItem: DispatchWorkItem?
     private var syntheticDownPosted = false
     private var syntheticFnDownPosted = false
+    private var syntheticKeyboardShortcutDownPosted = false
+    private var syntheticKeyboardShortcut: KeyboardShortcut?
     private var syntheticFnTapWorkItem: DispatchWorkItem?
     private var syntheticLocalFnToggleActive = false
     private var finishRequestedDuringSyntheticFnTap = false
@@ -56,12 +63,25 @@ final class ControlHoldMonitor {
     private var physicalFnIsDown = false
     private var suppressPhysicalFnRelease = false
     private var physicalModifierKeyCodes: Set<Int64> = []
+    private var customPrefixEvents: [CGEvent] = []
+    private var customPrefixModifierKeyCodes: Set<Int64> = []
+    private var customPrefixTarget: UURemoteTarget?
+    private var customSwallowedModifierKeyCodes: Set<Int64> = []
+    private var customOrphanedModifierKeyCodes: Set<Int64> = []
+    private var customSuppressedPrimaryKeyCodes: Set<Int64> = []
+    private var customTriggerDownEvents: [CGEvent] = []
+    private var customTriggerPrimaryKeyCode: Int64?
+    private var customTriggerModifierKeyCodes: Set<Int64> = []
     private var suppressedFnKeyUps = SuppressedKeyTransitions()
     private var fnCompanionKeySuppression = FnCompanionKeySuppression()
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private(set) var activeTapLocation: CGEventTapLocation?
-    var isGestureIdle: Bool { gesture.phase == .idle && fnGesture.phase == .idle }
+    var isGestureIdle: Bool {
+        gesture.phase == .idle && fnGesture.phase == .idle && customPrefixEvents.isEmpty &&
+            customSwallowedModifierKeyCodes.isEmpty && customSuppressedPrimaryKeyCodes.isEmpty &&
+            customOrphanedModifierKeyCodes.isEmpty
+    }
 
     init(
         profile: ShortcutProfile?,
@@ -73,7 +93,14 @@ final class ControlHoldMonitor {
         onBegin: @escaping (UURemoteTarget, ShortcutProfile) -> Void,
         onFnToggleMayBeActive: @escaping () -> Void,
         onRelease: @escaping () -> Void,
-        onCancel: @escaping () -> Void
+        onCancel: @escaping () -> Void,
+        customTargetWindowMatches: ((UURemoteTarget) -> Bool)? = nil,
+        customTargetWindowCapture: ((UURemoteTarget) -> Bool)? = nil,
+        customEventReplay: ((CGEventTapProxy, CGEvent) -> Void)? = nil,
+        syntheticKeyboardEventPoster: ((KeyboardShortcut, Bool) -> Bool)? = nil,
+        bridgeApplicationOwnsFocus: @escaping () -> Bool = {
+            NSWorkspace.shared.frontmostApplication?.bundleIdentifier == Bundle.main.bundleIdentifier
+        }
     ) {
         self.profile = profile
         self.holdThreshold = min(max(holdThreshold, 0.18), 0.60)
@@ -81,6 +108,11 @@ final class ControlHoldMonitor {
         self.targetProviderDiagnostic = targetProviderDiagnostic
         self.targetIsActive = targetIsActive
         self.localComposerReady = localComposerReady
+        self.customTargetWindowMatches = customTargetWindowMatches
+        self.customTargetWindowCapture = customTargetWindowCapture
+        self.customEventReplay = customEventReplay
+        self.syntheticKeyboardEventPoster = syntheticKeyboardEventPoster
+        self.bridgeApplicationOwnsFocus = bridgeApplicationOwnsFocus
         self.onBegin = onBegin
         self.onFnToggleMayBeActive = onFnToggleMayBeActive
         self.onRelease = onRelease
@@ -144,6 +176,7 @@ final class ControlHoldMonitor {
     func stop() {
         resetGesture(notifyCancel: true)
         resetFnToggle(notifyCancel: true)
+        clearCustomInterceptedState()
         if let source = runLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
         }
@@ -160,15 +193,32 @@ final class ControlHoldMonitor {
         profile = newProfile
     }
 
+    func processEventForTesting(type: CGEventType, event: CGEvent) -> Bool {
+        let proxy = unsafeBitCast(UInt(bitPattern: 1), to: CGEventTapProxy.self)
+        return handle(proxy: proxy, type: type, event: event) == nil
+    }
+
     func cancelActiveSession(event: ComposerInputEventMetadata) {
         logger.notice("Panel cancellation received reason=Escape type=\(event.type, privacy: .public) keyCode=\(event.keyCode, privacy: .public) flags=0x\(event.flagsHex, privacy: .public) sourcePID=\(event.sourcePID, privacy: .public) controlPhase=\(String(describing: self.gesture.phase), privacy: .public) fnPhase=\(String(describing: self.fnGesture.phase), privacy: .public) physicalFnDown=\(self.physicalFnIsDown, privacy: .public) syntheticFnDownPosted=\(self.syntheticFnDownPosted, privacy: .public)")
         resetGesture(notifyCancel: false)
         resetFnToggle(notifyCancel: false)
+        discardCustomInterceptedGesture()
         onCancel()
     }
 
     func cancelIfFocusLost() {
-        guard let target, !targetIsActive(target) else { return }
+        if let prefixTarget = customPrefixTarget, !isSameActiveTarget(prefixTarget) {
+            logger.notice("Discarding buffered modifier prefix after UU focus changed")
+            customOrphanedModifierKeyCodes.formUnion(customPrefixModifierKeyCodes)
+            customPrefixEvents.removeAll()
+            customPrefixModifierKeyCodes.removeAll()
+            customPrefixTarget = nil
+        }
+        guard let target else { return }
+        let targetLost = activeProfile?.usesCustomBridge == true
+            ? !isSameActiveTarget(target)
+            : !targetIsActive(target)
+        guard targetLost else { return }
         if fnGesture.phase == .pendingClick {
             logger.notice("Pending Fn click cancelled because focus left UU and the bridge")
             resetFnToggle(notifyCancel: false)
@@ -179,9 +229,453 @@ final class ControlHoldMonitor {
         if gesture.phase == .pending || gesture.phase == .dictating {
             let shouldNotify = gesture.phase == .dictating
             logger.notice("Control-hold session cancelled because focus left UU and the bridge")
+            discardCustomInterceptedGesture()
             resetGesture(notifyCancel: false)
             if shouldNotify { onCancel() }
         }
+    }
+
+    private func handleCustomBridgeEvent(
+        proxy: CGEventTapProxy,
+        type: CGEventType,
+        event: CGEvent
+    ) -> Unmanaged<CGEvent>? {
+        guard let profile, profile.customBridgeIsSupported else {
+            return passthroughCustomEvent(proxy: proxy, event: event)
+        }
+        let shortcut = profile.bridgeShortcut
+        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+
+        if type == .keyDown || type == .keyUp {
+            let companionType: FnCompanionKeyEventType = type == .keyDown ? .keyDown : .keyUp
+            if fnCompanionKeySuppression.shouldSuppress(
+                type: companionType,
+                keyCode: keyCode,
+                sourcePID: event.getIntegerValueField(.eventSourceUnixProcessID),
+                at: ProcessInfo.processInfo.systemUptime
+            ) {
+                return nil
+            }
+        }
+
+        if gesture.phase == .pending, let triggerTarget = target, !isSameActiveTarget(triggerTarget) {
+            logger.notice("Dropping pending custom trigger after UU focus changed")
+            _ = abortPendingCustomTrigger(proxy: proxy)
+        }
+        if !customOrphanedModifierKeyCodes.isEmpty {
+            if type == .keyUp, customSuppressedPrimaryKeyCodes.remove(keyCode) != nil {
+                return nil
+            }
+            return neutralizeOrphanedModifierEvent(proxy: proxy, type: type, event: event)
+        }
+
+        if let prefixTarget = customPrefixTarget,
+           !isSameActiveTarget(prefixTarget) {
+            logger.notice("Dropping a buffered shortcut prefix after UU focus changed")
+            customOrphanedModifierKeyCodes.formUnion(customPrefixModifierKeyCodes)
+            customPrefixEvents.removeAll()
+            customPrefixModifierKeyCodes.removeAll()
+            customPrefixTarget = nil
+        }
+        if !customOrphanedModifierKeyCodes.isEmpty {
+            return neutralizeOrphanedModifierEvent(proxy: proxy, type: type, event: event)
+        }
+
+        if type == .flagsChanged {
+            let modifier = KeyboardShortcut.modifierFlag(for: keyCode)
+            guard let modifier else {
+                if !customPrefixEvents.isEmpty, !flushCustomPrefix(proxy: proxy) {
+                    return neutralizeOrphanedModifierEvent(proxy: proxy, type: type, event: event)
+                }
+                if gesture.phase == .pending { abortPendingCustomTrigger(proxy: proxy) }
+                return passthroughCustomEvent(proxy: proxy, event: event)
+            }
+            let wasDown = keyCode == 63 ? physicalFnIsDown : physicalModifierKeyCodes.contains(keyCode)
+            let isDown: Bool
+            if keyCode == 63 {
+                isDown = event.flags.contains(.maskSecondaryFn)
+                physicalFnIsDown = isDown
+            } else {
+                isDown = !wasDown
+            }
+            if keyCode != 63, isDown {
+                physicalModifierKeyCodes.insert(keyCode)
+            } else if keyCode != 63 {
+                physicalModifierKeyCodes.remove(keyCode)
+            }
+            if keyCode == 63, isDown {
+                fnCompanionKeySuppression.arm(at: ProcessInfo.processInfo.systemUptime)
+            }
+
+            if customSwallowedModifierKeyCodes.contains(keyCode) {
+                if !isDown, customTriggerModifierKeyCodes.contains(keyCode), gesture.phase == .pending {
+                    _ = abortPendingCustomTrigger(proxy: proxy, releasingEvent: event)
+                    return nil
+                }
+                if customTriggerModifierKeyCodes.contains(keyCode), !isDown {
+                    customTriggerModifierKeyCodes.remove(keyCode)
+                    releaseCustomBridgeTrigger(proxy: proxy, releasingEvent: event)
+                }
+                if !isDown { customSwallowedModifierKeyCodes.remove(keyCode) }
+                return nil
+            }
+
+            if shortcut.isModifierOnly, keyCode == Int64(shortcut.keyCode) {
+                if isDown {
+                    let exactModifierState: Bool
+                    if keyCode == 63 {
+                        exactModifierState = event.flags.contains(.maskSecondaryFn) &&
+                            event.flags.rawValue & KeyboardShortcut.supportedModifierMask == 0 &&
+                            physicalModifierKeyCodes.isEmpty
+                    } else {
+                        exactModifierState = event.flags.rawValue & KeyboardShortcut.supportedModifierMask == modifier &&
+                            physicalModifierKeyCodes == [keyCode]
+                    }
+                    guard exactModifierState,
+                          let activeTarget = targetProvider() else {
+                        return passthroughCustomEvent(proxy: proxy, event: event)
+                    }
+                    if let triggerDownCopy = event.copy() {
+                        customTriggerDownEvents = [triggerDownCopy]
+                    }
+                    guard beginCustomBridgeTrigger(target: activeTarget, profile: profile) else {
+                        customTriggerDownEvents.removeAll()
+                        return passthroughCustomEvent(proxy: proxy, event: event)
+                    }
+                    customSwallowedModifierKeyCodes.insert(keyCode)
+                    customTriggerModifierKeyCodes.insert(keyCode)
+                    return nil
+                }
+                return passthroughCustomEvent(proxy: proxy, event: event)
+            }
+
+            guard shortcut.modifierMask & modifier != 0 else {
+                if !customPrefixEvents.isEmpty {
+                    guard flushCustomPrefix(proxy: proxy) else {
+                        return neutralizeOrphanedModifierEvent(proxy: proxy, type: type, event: event)
+                    }
+                }
+                if gesture.phase == .pending {
+                    let replayed = abortPendingCustomTrigger(proxy: proxy)
+                    if !replayed, !customOrphanedModifierKeyCodes.isEmpty {
+                        return neutralizeOrphanedModifierEvent(proxy: proxy, type: type, event: event)
+                    }
+                }
+                return passthroughCustomEvent(proxy: proxy, event: event)
+            }
+            guard isDown else {
+                if !customPrefixEvents.isEmpty {
+                    guard flushCustomPrefix(proxy: proxy) else {
+                        return neutralizeOrphanedModifierEvent(proxy: proxy, type: type, event: event)
+                    }
+                }
+                if gesture.phase == .pending {
+                    let replayed = abortPendingCustomTrigger(proxy: proxy)
+                    if !replayed, !customOrphanedModifierKeyCodes.isEmpty {
+                        return neutralizeOrphanedModifierEvent(proxy: proxy, type: type, event: event)
+                    }
+                }
+                return passthroughCustomEvent(proxy: proxy, event: event)
+            }
+
+            let activeMask = event.flags.rawValue & KeyboardShortcut.supportedModifierMask
+            guard activeMask & ~shortcut.modifierMask == 0,
+                  let activeTarget = targetProvider() else {
+                if !customPrefixEvents.isEmpty, !flushCustomPrefix(proxy: proxy) {
+                    return neutralizeOrphanedModifierEvent(proxy: proxy, type: type, event: event)
+                }
+                if gesture.phase == .pending {
+                    let replayed = abortPendingCustomTrigger(proxy: proxy)
+                    if !replayed, !customOrphanedModifierKeyCodes.isEmpty {
+                        return neutralizeOrphanedModifierEvent(proxy: proxy, type: type, event: event)
+                    }
+                }
+                return passthroughCustomEvent(proxy: proxy, event: event)
+            }
+            if gesture.phase == .pending { abortPendingCustomTrigger(proxy: proxy) }
+            if customPrefixTarget == nil {
+                guard captureCustomTargetWindow(activeTarget) else {
+                    return passthroughCustomEvent(proxy: proxy, event: event)
+                }
+                customPrefixTarget = activeTarget
+            }
+            customPrefixEvents.append(event)
+            customPrefixModifierKeyCodes.insert(keyCode)
+            return nil
+        }
+
+        if type == .keyUp, customSuppressedPrimaryKeyCodes.remove(keyCode) != nil {
+            if customTriggerPrimaryKeyCode == keyCode {
+                customTriggerPrimaryKeyCode = nil
+                releaseCustomBridgeTrigger(proxy: proxy, releasingEvent: event)
+            }
+            return nil
+        }
+
+        if !customPrefixEvents.isEmpty {
+            if type == .keyDown,
+               keyCode == Int64(shortcut.keyCode),
+               let prefixTarget = customPrefixTarget,
+               isSameActiveTarget(prefixTarget),
+               customPrefixFlags & shortcut.modifierMask == shortcut.modifierMask,
+               event.flags.rawValue & KeyboardShortcut.supportedModifierMask == shortcut.modifierMask {
+                let prefixModifierKeyCodes = customPrefixModifierKeyCodes
+                customTriggerDownEvents = customPrefixEvents
+                if let triggerDownCopy = event.copy() {
+                    customTriggerDownEvents.append(triggerDownCopy)
+                }
+                customPrefixEvents.removeAll()
+                customPrefixModifierKeyCodes.removeAll()
+                customPrefixTarget = nil
+                guard beginCustomBridgeTrigger(
+                    target: prefixTarget,
+                    profile: profile,
+                    targetWindowAlreadyCaptured: true
+                ) else {
+                    customOrphanedModifierKeyCodes.formUnion(prefixModifierKeyCodes)
+                    customTriggerDownEvents.removeAll()
+                    if !customOrphanedModifierKeyCodes.isEmpty {
+                        return neutralizeOrphanedModifierEvent(proxy: proxy, type: type, event: event)
+                    }
+                    return passthroughCustomEvent(proxy: proxy, event: event)
+                }
+                customSwallowedModifierKeyCodes.formUnion(prefixModifierKeyCodes)
+                customTriggerModifierKeyCodes = prefixModifierKeyCodes
+                customSuppressedPrimaryKeyCodes.insert(keyCode)
+                customTriggerPrimaryKeyCode = keyCode
+                return nil
+            }
+            if type == .keyDown || type == .keyUp || type == .leftMouseDown ||
+                type == .rightMouseDown || type == .otherMouseDown || type == .scrollWheel {
+                guard flushCustomPrefix(proxy: proxy) else {
+                    return neutralizeOrphanedModifierEvent(proxy: proxy, type: type, event: event)
+                }
+                return passthroughCustomEvent(proxy: proxy, event: event)
+            }
+        }
+
+        if type == .keyDown {
+            if customSuppressedPrimaryKeyCodes.contains(keyCode) { return nil }
+            if gesture.phase == .pending {
+                let replayed = abortPendingCustomTrigger(proxy: proxy)
+                if !replayed, !customOrphanedModifierKeyCodes.isEmpty {
+                    return neutralizeOrphanedModifierEvent(proxy: proxy, type: type, event: event)
+                }
+            }
+            let activeModifiers = event.flags.rawValue & KeyboardShortcut.supportedModifierMask
+            if !shortcut.isModifierOnly,
+               keyCode == Int64(shortcut.keyCode),
+               shortcut.modifierMask == 0,
+               activeModifiers == 0,
+               !physicalFnIsDown,
+               let activeTarget = targetProvider() {
+                if let triggerDownCopy = event.copy() {
+                    customTriggerDownEvents = [triggerDownCopy]
+                }
+                guard beginCustomBridgeTrigger(target: activeTarget, profile: profile) else {
+                    customTriggerDownEvents.removeAll()
+                    return passthroughCustomEvent(proxy: proxy, event: event)
+                }
+                customSuppressedPrimaryKeyCodes.insert(keyCode)
+                customTriggerPrimaryKeyCode = keyCode
+                return nil
+            }
+        }
+        if (type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown || type == .scrollWheel),
+           gesture.phase == .pending {
+            abortPendingCustomTrigger(proxy: proxy)
+        }
+        return passthroughCustomEvent(proxy: proxy, event: event)
+    }
+
+    private var customPrefixFlags: UInt64 {
+        customPrefixModifierKeyCodes.reduce(0) { partial, keyCode in
+            partial | (KeyboardShortcut.modifierFlag(for: keyCode) ?? 0)
+        }
+    }
+
+    private func beginCustomBridgeTrigger(
+        target: UURemoteTarget,
+        profile: ShortcutProfile,
+        targetWindowAlreadyCaptured: Bool = false
+    ) -> Bool {
+        guard case .idle = gesture.phase else { return false }
+        if targetWindowAlreadyCaptured {
+            guard customTargetWindowIsCurrent(target) else { return false }
+        } else {
+            guard captureCustomTargetWindow(target) else { return false }
+        }
+        self.target = target
+        activeProfile = profile
+        _ = gesture.handle(.controlDown(targetAvailable: true))
+        let workItem = DispatchWorkItem { [weak self] in self?.activateDictationIfStillPending() }
+        activationWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + holdThreshold, execute: workItem)
+        return true
+    }
+
+    private func releaseCustomBridgeTrigger(proxy: CGEventTapProxy, releasingEvent: CGEvent) {
+        switch gesture.phase {
+        case .pending:
+            _ = abortPendingCustomTrigger(proxy: proxy, releasingEvent: releasingEvent)
+        case .dictating:
+            _ = gesture.handle(.controlUp)
+            finishDictationGesture()
+        case .idle, .passthrough:
+            break
+        }
+    }
+
+    private func isSameActiveTarget(_ expected: UURemoteTarget) -> Bool {
+        let targetIsFrontmost = targetProvider()?.processIdentifier == expected.processIdentifier
+        return targetIsActive(expected) && customTargetWindowIsCurrent(expected) &&
+            (targetIsFrontmost || bridgeApplicationOwnsFocus())
+    }
+
+    private func customTargetWindowIsCurrent(_ target: UURemoteTarget) -> Bool {
+        customTargetWindowMatches?(target) ?? target.stillMatchesFocusedWindow()
+    }
+
+    private func captureCustomTargetWindow(_ target: UURemoteTarget) -> Bool {
+        customTargetWindowCapture?(target) ?? target.captureFocusedWindow()
+    }
+
+    private func passthroughCustomEvent(proxy: CGEventTapProxy, event: CGEvent) -> Unmanaged<CGEvent>? {
+        guard !customOrphanedModifierKeyCodes.isEmpty || !customSwallowedModifierKeyCodes.isEmpty else {
+            return Unmanaged.passUnretained(event)
+        }
+        return neutralizeConsumedModifierFlags(proxy: proxy, type: event.type, event: event)
+    }
+
+    private func replayCustomEvent(_ original: CGEvent, proxy: CGEventTapProxy) {
+        guard let replay = original.copy() else { return }
+        replay.setIntegerValueField(.eventSourceUserData, value: Self.syntheticEventMarker)
+        if let customEventReplay {
+            customEventReplay(proxy, replay)
+        } else {
+            replay.tapPostEvent(proxy)
+        }
+    }
+
+    private func preserveOrphanedCustomModifiersAfterTapInterruption() {
+        discardCustomInterceptedGesture()
+    }
+
+    private func discardCustomInterceptedGesture() {
+        customOrphanedModifierKeyCodes.formUnion(customPrefixModifierKeyCodes)
+        customOrphanedModifierKeyCodes.formUnion(customTriggerModifierKeyCodes)
+        customOrphanedModifierKeyCodes.formUnion(customSwallowedModifierKeyCodes)
+        customPrefixEvents.removeAll()
+        customPrefixModifierKeyCodes.removeAll()
+        customPrefixTarget = nil
+        customSwallowedModifierKeyCodes.removeAll()
+        customTriggerModifierKeyCodes.removeAll()
+        customTriggerDownEvents.removeAll()
+        customTriggerPrimaryKeyCode = nil
+    }
+
+    private func clearCustomInterceptedState() {
+        customPrefixEvents.removeAll()
+        customPrefixModifierKeyCodes.removeAll()
+        customPrefixTarget = nil
+        customSwallowedModifierKeyCodes.removeAll()
+        customOrphanedModifierKeyCodes.removeAll()
+        customSuppressedPrimaryKeyCodes.removeAll()
+        customTriggerDownEvents.removeAll()
+        customTriggerPrimaryKeyCode = nil
+        customTriggerModifierKeyCodes.removeAll()
+    }
+
+    @discardableResult
+    private func flushCustomPrefix(proxy: CGEventTapProxy) -> Bool {
+        guard !customPrefixEvents.isEmpty else { return true }
+        guard let prefixTarget = customPrefixTarget, isSameActiveTarget(prefixTarget) else {
+            customOrphanedModifierKeyCodes.formUnion(customPrefixModifierKeyCodes)
+            customPrefixEvents.removeAll()
+            customPrefixModifierKeyCodes.removeAll()
+            customPrefixTarget = nil
+            return false
+        }
+        for original in customPrefixEvents {
+            replayCustomEvent(original, proxy: proxy)
+        }
+        customPrefixEvents.removeAll()
+        customPrefixModifierKeyCodes.removeAll()
+        customPrefixTarget = nil
+        return true
+    }
+
+    @discardableResult
+    private func abortPendingCustomTrigger(proxy: CGEventTapProxy, releasingEvent: CGEvent? = nil) -> Bool {
+        guard gesture.phase == .pending else { return false }
+        activationWorkItem?.cancel()
+        activationWorkItem = nil
+        if releasingEvent == nil, customTriggerModifierKeyCodes.contains(63) {
+            fnCompanionKeySuppression.disarm()
+        }
+        let expectedTarget = target
+        var replaySucceeded = false
+        if let expectedTarget, isSameActiveTarget(expectedTarget) {
+            for original in customTriggerDownEvents {
+                replayCustomEvent(original, proxy: proxy)
+            }
+            if let releasingEvent { replayCustomEvent(releasingEvent, proxy: proxy) }
+            replaySucceeded = true
+            customSuppressedPrimaryKeyCodes.removeAll()
+            customSwallowedModifierKeyCodes.subtract(customTriggerModifierKeyCodes)
+        } else {
+            customOrphanedModifierKeyCodes.formUnion(customTriggerModifierKeyCodes)
+            customSwallowedModifierKeyCodes.subtract(customTriggerModifierKeyCodes)
+        }
+        customTriggerDownEvents.removeAll()
+        resetGesture(notifyCancel: false)
+        return replaySucceeded
+    }
+
+    private func neutralizeOrphanedModifierEvent(
+        proxy: CGEventTapProxy,
+        type: CGEventType,
+        event: CGEvent
+    ) -> Unmanaged<CGEvent>? {
+        neutralizeConsumedModifierFlags(proxy: proxy, type: type, event: event)
+    }
+
+    private func neutralizeConsumedModifierFlags(
+        proxy: CGEventTapProxy,
+        type: CGEventType,
+        event: CGEvent
+    ) -> Unmanaged<CGEvent>? {
+        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+        let currentOrphanedMask = customOrphanedModifierKeyCodes.reduce(UInt64(0)) { partial, code in
+            partial | (KeyboardShortcut.modifierFlag(for: code) ?? 0)
+        }
+        if type == .flagsChanged, customOrphanedModifierKeyCodes.contains(keyCode) {
+            let isDown: Bool
+            if keyCode == 63 {
+                isDown = event.flags.contains(.maskSecondaryFn)
+                physicalFnIsDown = isDown
+            } else {
+                let wasDown = physicalModifierKeyCodes.contains(keyCode)
+                isDown = !wasDown
+            }
+            if keyCode != 63, isDown {
+                physicalModifierKeyCodes.insert(keyCode)
+            } else if keyCode != 63 {
+                physicalModifierKeyCodes.remove(keyCode)
+            }
+            if !isDown {
+                customOrphanedModifierKeyCodes.remove(keyCode)
+            }
+        }
+        let swallowedMask = customSwallowedModifierKeyCodes.reduce(UInt64(0)) { partial, code in
+            partial | (KeyboardShortcut.modifierFlag(for: code) ?? 0)
+        }
+        let mask = currentOrphanedMask | swallowedMask
+        guard mask != 0 else { return Unmanaged.passUnretained(event) }
+        guard let replay = event.copy() else { return nil }
+        replay.flags = CGEventFlags(rawValue: event.flags.rawValue & ~mask)
+        replayCustomEvent(replay, proxy: proxy)
+        return nil
     }
 
     private func handle(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
@@ -189,6 +683,7 @@ final class ControlHoldMonitor {
             logger.error("HID event tap disabled; re-enabling (reason=\(type.rawValue, privacy: .public))")
             if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: true) }
             let pendingFnClickWasIntercepted = fnGesture.phase == .pendingClick
+            preserveOrphanedCustomModifiersAfterTapInterruption()
             resetGesture(notifyCancel: true)
             resetFnToggle(notifyCancel: true)
             refreshPhysicalKeyStates()
@@ -206,6 +701,9 @@ final class ControlHoldMonitor {
 
         if profile?.usesFnBridge == true {
             return handleFnToggleEvent(proxy: proxy, type: type, event: event)
+        }
+        if profile?.usesCustomBridge == true {
+            return handleCustomBridgeEvent(proxy: proxy, type: type, event: event)
         }
         guard profile?.usesLeftControlBridge == true else {
             return Unmanaged.passUnretained(event)
@@ -618,6 +1116,34 @@ final class ControlHoldMonitor {
         return true
     }
 
+    @discardableResult
+    private func postSyntheticKeyboardShortcut(_ shortcut: KeyboardShortcut, down: Bool) -> Bool {
+        if let syntheticKeyboardEventPoster {
+            return syntheticKeyboardEventPoster(shortcut, down)
+        }
+        guard let source = CGEventSource(stateID: .combinedSessionState) else { return false }
+        for description in SyntheticKeyboardShortcutPlan.events(for: shortcut, down: down) {
+            let event: CGEvent?
+            switch description.kind {
+            case .flagsChanged:
+                event = CGEvent(source: source)
+                event?.type = .flagsChanged
+            case .keyDown, .keyUp:
+                event = CGEvent(
+                    keyboardEventSource: source,
+                    virtualKey: CGKeyCode(description.keyCode),
+                    keyDown: description.kind == .keyDown
+                )
+            }
+            guard let event else { return false }
+            event.setIntegerValueField(.keyboardEventKeycode, value: Int64(description.keyCode))
+            event.setIntegerValueField(.eventSourceUserData, value: Self.syntheticEventMarker)
+            event.flags = CGEventFlags(rawValue: description.flags)
+            event.post(tap: .cgSessionEventTap)
+        }
+        return true
+    }
+
     private func refreshPhysicalKeyStates() {
         physicalLeftControlIsDown = CGEventSource.keyState(
             .combinedSessionState,
@@ -675,16 +1201,31 @@ final class ControlHoldMonitor {
         }
     }
 
-    private func activateDictationIfStillPending() {
+    func activateDictationIfStillPending() {
         guard case .pending = gesture.phase, let target else { return }
-        guard !physicalRightControlIsDown,
-              targetProvider()?.processIdentifier == target.processIdentifier else {
+        let targetIsValid = activeProfile?.usesCustomBridge == true
+            ? isSameActiveTarget(target)
+            : targetIsActive(target) && targetProvider()?.processIdentifier == target.processIdentifier
+        guard targetIsValid else {
             logger.notice("Long-press cancelled because UU is no longer the eligible target")
+            if activeProfile?.usesCustomBridge == true {
+                discardCustomInterceptedGesture()
+            }
             resetGesture(notifyCancel: false)
             return
         }
         _ = gesture.handle(.thresholdReached)
-        target.captureFocusedWindow()
+        customTriggerDownEvents.removeAll()
+        if activeProfile?.usesCustomBridge == true {
+            guard customTargetWindowIsCurrent(target) else {
+                logger.notice("Custom long-press cancelled because the captured UU window changed")
+                discardCustomInterceptedGesture()
+                resetGesture(notifyCancel: false)
+                return
+            }
+        } else {
+            target.captureFocusedWindow()
+        }
         logger.notice("Long-press threshold reached; opening local composer")
         guard let activeProfile else {
             resetGesture(notifyCancel: false)
@@ -695,10 +1236,11 @@ final class ControlHoldMonitor {
         scheduleSyntheticDownCheck(after: 0.03)
     }
 
-    private func postSyntheticDownIfNeeded() {
+    func postSyntheticDownIfNeeded() {
         guard case .dictating = gesture.phase,
               !syntheticDownPosted,
               !syntheticFnDownPosted,
+              !syntheticKeyboardShortcutDownPosted,
               syntheticFnTapWorkItem == nil else { return }
         if releaseRequestedBeforeSyntheticDown {
             onCancel()
@@ -721,28 +1263,32 @@ final class ControlHoldMonitor {
             resetGesture(notifyCancel: false)
             return
         }
+        let localShortcut = activeProfile.doubao.keyboardShortcut
         if activeProfile.doubao.mode == .fnToggle {
-            guard postSyntheticFn(down: true) else {
-                logger.error("Unable to create synthetic local Fn down for Control bridge")
+            guard postSyntheticKeyboardShortcut(localShortcut, down: true) else {
+                logger.error("Unable to post synthetic local Doubao shortcut down")
                 onCancel()
                 resetGesture(notifyCancel: false)
                 return
             }
-            syntheticFnDownPosted = true
+            syntheticKeyboardShortcut = localShortcut
+            syntheticKeyboardShortcutDownPosted = true
             onFnToggleMayBeActive()
             let workItem = DispatchWorkItem { [weak self] in
                 guard let self else { return }
-                guard self.syntheticFnDownPosted else { return }
-                guard self.postSyntheticFn(down: false) else {
-                    self.logger.error("Unable to create synthetic local Fn up for Control bridge")
+                guard self.syntheticKeyboardShortcutDownPosted,
+                      let shortcut = self.syntheticKeyboardShortcut else { return }
+                guard self.postSyntheticKeyboardShortcut(shortcut, down: false) else {
+                    self.logger.error("Unable to post synthetic local Doubao shortcut up")
                     self.onCancel()
                     self.resetGesture(notifyCancel: false)
                     return
                 }
-                self.syntheticFnDownPosted = false
+                self.syntheticKeyboardShortcutDownPosted = false
+                self.syntheticKeyboardShortcut = nil
                 self.syntheticFnTapWorkItem = nil
                 self.syntheticLocalFnToggleActive = true
-                self.logger.notice("Synthetic local Fn toggle tap posted for Control bridge")
+                self.logger.notice("Synthetic local Doubao toggle tap posted for bridge")
                 if self.finishRequestedDuringSyntheticFnTap {
                     self.finishRequestedDuringSyntheticFnTap = false
                     self.finishLocalFnToggleFromControlRelease()
@@ -753,17 +1299,16 @@ final class ControlHoldMonitor {
             return
         }
 
-        let route = SyntheticControlRoute.localSessionDictation
-        guard postSyntheticControl(down: true, route: route) else {
-            logger.error("Unable to create synthetic local Control down")
+        guard postSyntheticKeyboardShortcut(localShortcut, down: true) else {
+            logger.error("Unable to post synthetic local Doubao shortcut down")
             onCancel()
             resetGesture(notifyCancel: false)
             return
         }
-        syntheticDownPosted = true
+        syntheticKeyboardShortcut = localShortcut
+        syntheticKeyboardShortcutDownPosted = true
         syntheticDownAt = Date()
-        syntheticRoute = route
-        logger.notice("Synthetic local Control down posted at session tap")
+        logger.notice("Synthetic local Doubao shortcut down posted at session tap keyCode=\(localShortcut.keyCode, privacy: .public) flags=0x\(String(localShortcut.modifierMask, radix: 16), privacy: .public)")
     }
 
     private func scheduleSyntheticDownCheck(after delay: TimeInterval) {
@@ -778,15 +1323,14 @@ final class ControlHoldMonitor {
             finishLocalFnToggleFromControlRelease()
             return
         }
-        if syntheticFnDownPosted, syntheticFnTapWorkItem != nil {
+        if syntheticKeyboardShortcutDownPosted, syntheticFnTapWorkItem != nil {
             finishRequestedDuringSyntheticFnTap = true
             return
         }
-        if syntheticDownPosted {
-            if let syntheticRoute {
-                postSyntheticControl(down: false, route: syntheticRoute)
-            }
-            syntheticDownPosted = false
+        if syntheticKeyboardShortcutDownPosted, let syntheticKeyboardShortcut {
+            postSyntheticKeyboardShortcut(syntheticKeyboardShortcut, down: false)
+            syntheticKeyboardShortcutDownPosted = false
+            self.syntheticKeyboardShortcut = nil
             let heldLongEnough = Date().timeIntervalSince(syntheticDownAt ?? .distantPast) >= 0.15
             if heldLongEnough {
                 logger.notice("Local Doubao voice input method gesture completed; waiting for transcript")
@@ -834,7 +1378,9 @@ final class ControlHoldMonitor {
 
     private func resetGesture(notifyCancel: Bool) {
         let wasDictating = gesture.phase == .dictating
-        if syntheticDownPosted, let syntheticRoute {
+        if syntheticKeyboardShortcutDownPosted, let syntheticKeyboardShortcut {
+            _ = postSyntheticKeyboardShortcut(syntheticKeyboardShortcut, down: false)
+        } else if syntheticDownPosted, let syntheticRoute {
             postSyntheticControl(down: false, route: syntheticRoute)
         }
         if syntheticFnDownPosted {
@@ -847,6 +1393,8 @@ final class ControlHoldMonitor {
         syntheticDownWorkItem = nil
         syntheticDownPosted = false
         syntheticFnDownPosted = false
+        syntheticKeyboardShortcutDownPosted = false
+        syntheticKeyboardShortcut = nil
         syntheticFnTapWorkItem = nil
         syntheticLocalFnToggleActive = false
         finishRequestedDuringSyntheticFnTap = false
@@ -854,6 +1402,9 @@ final class ControlHoldMonitor {
         syntheticRoute = nil
         localFocusDeadline = nil
         releaseRequestedBeforeSyntheticDown = false
+        customTriggerPrimaryKeyCode = nil
+        customTriggerModifierKeyCodes.removeAll()
+        customTriggerDownEvents.removeAll()
         gesture.reset()
         target = nil
         activeProfile = nil

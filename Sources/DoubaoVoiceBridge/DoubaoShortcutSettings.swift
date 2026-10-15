@@ -61,14 +61,51 @@ struct DoubaoShortcutConfiguration: Equatable {
     let mode: DoubaoShortcutMode
     let source: DoubaoShortcutSource
     let observedAt: Date
+    let shortcut: KeyboardShortcut?
+
+    init(
+        mode: DoubaoShortcutMode,
+        source: DoubaoShortcutSource,
+        observedAt: Date,
+        shortcut: KeyboardShortcut? = nil
+    ) {
+        self.mode = mode
+        self.source = source
+        self.observedAt = observedAt
+        self.shortcut = shortcut
+    }
+
+    var keyboardShortcut: KeyboardShortcut {
+        shortcut ?? (mode == .fnToggle ? .fn : .leftControl)
+    }
+
+    var instruction: String {
+        switch mode {
+        case .fnToggle:
+            return "按 \(keyboardShortcut.displayName) 启动，任意键结束"
+        case .leftControlHold:
+            return "按住 \(keyboardShortcut.displayName) 说话，松开结束"
+        case .disabled, .unsupported:
+            return mode.instruction
+        }
+    }
 
     var sourceAndTime: String {
         let time = DateFormatter.localizedString(from: observedAt, dateStyle: .none, timeStyle: .short)
         return "来源：\(source.description)，读取于 \(time)"
     }
 
-    static func manual(_ mode: DoubaoShortcutMode) -> DoubaoShortcutConfiguration {
-        DoubaoShortcutConfiguration(mode: mode, source: .manual, observedAt: Date())
+    static func manual(
+        _ mode: DoubaoShortcutMode,
+        shortcut: KeyboardShortcut? = nil
+    ) -> DoubaoShortcutConfiguration {
+        let defaultShortcut = mode == .fnToggle ? KeyboardShortcut.fn : KeyboardShortcut.leftControl
+        return DoubaoShortcutConfiguration(
+            mode: mode,
+            source: .manual,
+            observedAt: Date(),
+            shortcut: shortcut == defaultShortcut ? nil : shortcut
+        )
     }
 }
 
