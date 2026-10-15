@@ -85,19 +85,31 @@ enum DoubaoShortcutSettingsReader {
 
     private static let shortcutTextMarkers = [
         "快捷键", "免按模式", "长按模式", "按一次即可开始说话", "再按任意键可结束",
-        "asrshortcut", "asrlongpress", "fn"
+        "按住说话", "松手结束", "松开结束", "asrshortcut", "asrlongpress", "fn",
+        "left control", "left ctrl", "leftcontrol", "leftctrl", "左control", "左ctrl",
+        "right control", "right ctrl", "rightcontrol", "rightctrl", "右control", "右ctrl",
+        "⌃", "control", "ctrl", "全局唤起语音", "离线语音", "高级设置", "其他设置"
     ]
     private static let modeGroupBoundaries = ["全局唤起语音", "离线语音", "高级设置", "其他设置"]
     private static let excludedAXRoles: Set<String> = [
         "AXTextField", "AXTextArea", "AXTextView", "AXSearchField", "AXTable", "AXOutline",
         "AXList", "AXRow", "AXCell"
     ]
+    private static let explicitLeftControlTokens = [
+        "leftcontrol", "leftctrl", "左control", "左ctrl", "left⌃", "左⌃"
+    ]
+    private static let explicitRightControlTokens = [
+        "rightcontrol", "rightctrl", "右control", "右ctrl", "right⌃", "右⌃"
+    ]
     private static let visibleKeyTokens = [
-        "fn", "左control", "leftcontrol", "左ctrl", "leftctrl", "control", "ctrl", "⌃",
-        "左shift", "leftshift", "shift", "⇧", "左option", "leftoption", "option", "alt", "⌥",
+        "fn", "左shift", "leftshift", "shift", "⇧", "左option", "leftoption", "option", "alt", "⌥",
         "左command", "leftcommand", "command", "cmd", "⌘", "空格", "space", "回车", "return",
         "enter", "tab", "escape", "esc", "capslock"
     ]
+    private static let standaloneVisibleKeyValues = Set(
+        (visibleKeyTokens + explicitLeftControlTokens + explicitRightControlTokens + ["control", "ctrl"])
+            .map { $0.lowercased().filter { !$0.isWhitespace } }
+    )
 
     static func discover() -> DoubaoShortcutConfiguration? {
         if let visibleConfiguration = readVisibleSettingsWindow() {
@@ -161,26 +173,10 @@ enum DoubaoShortcutSettingsReader {
     }
 
     static func mode(fromVisibleSettingsText text: String) -> DoubaoShortcutMode? {
-        let normalized = text.lowercased().filter { !$0.isWhitespace }
-        guard normalized.contains("免按模式"),
-              normalized.contains("按一次即可开始说话"),
-              normalized.contains("再按任意键可结束") else { return nil }
-
-        guard let modeRange = normalized.range(of: "免按模式") else { return nil }
-        let modeText = String(normalized[modeRange.upperBound...])
-        guard let startRange = modeText.range(of: "按一次即可开始说话"),
-              let endingRange = modeText.range(
-                  of: "再按任意键可结束",
-                  range: startRange.upperBound..<modeText.endIndex
-              ) else { return nil }
-        let selectedKeyArea = String(modeText[..<startRange.lowerBound]) +
-            String(modeText[endingRange.upperBound...])
-
-        let candidates = visibleKeyTokens.filter { containsVisibleToken($0, in: selectedKeyArea) }
-        let uniqueCandidates = Array(Set(candidates))
-        guard uniqueCandidates.count == 1 else { return nil }
-        let candidate = uniqueCandidates[0]
-        return candidate == "fn" ? .fnToggle : .unsupported(candidate)
+        let modes = modeGroups(in: [[text]]).compactMap(mode(fromVisibleModeGroup:))
+        let uniqueModes = Array(Set(modes))
+        guard uniqueModes.count == 1 else { return nil }
+        return uniqueModes[0]
     }
 
     static func readVisibleSettingsWindow() -> DoubaoShortcutConfiguration? {
@@ -207,10 +203,10 @@ enum DoubaoShortcutSettingsReader {
         let uniqueModes = Array(Set(candidates))
         let modeDescription = uniqueModes.count == 1 ? uniqueModes[0].instruction : "unreadable or conflicting"
         let candidateGroups = modeGroups(in: snapshot.windows)
-        let instructionFragmentCount = candidateGroups.filter { hasToggleInstructions($0.joined()) }.count
+        let instructionFragmentCount = candidateGroups.filter { hasShortcutModeInstructions($0.joined()) }.count
         let categorySummary = candidateCategorySummary(candidates)
         let snippets = candidateGroups
-            .filter { hasToggleInstructions($0.joined()) }
+            .filter { hasShortcutModeInstructions($0.joined()) }
             .map(shortSettingsSnippet)
             .prefix(3)
             .joined(separator: " || ")
@@ -272,9 +268,49 @@ enum DoubaoShortcutSettingsReader {
     }
 
     static func visibleModeCandidates(in windows: [[String]]) -> [DoubaoShortcutMode] {
-        modeGroups(in: windows).compactMap { group in
-            mode(fromVisibleSettingsText: group.joined(separator: " "))
+        let filteredWindows = windows.map { $0.filter(shouldCollectShortcutText) }
+        return modeGroups(in: filteredWindows).compactMap(mode(fromVisibleModeGroup:))
+    }
+
+    static func shouldCollectShortcutText(_ text: String) -> Bool {
+        let lowercased = text.lowercased()
+        let compacted = lowercased.filter { !$0.isWhitespace }
+        return standaloneVisibleKeyValues.contains(compacted) || shortcutTextMarkers.contains { marker in
+            lowercased.contains(marker) || compacted.contains(marker.filter { !$0.isWhitespace })
         }
+    }
+
+    private static func mode(fromVisibleModeGroup group: [String]) -> DoubaoShortcutMode? {
+        let normalized = group.joined(separator: "|").lowercased().filter { !$0.isWhitespace }
+        if normalized.contains("免按模式"),
+           normalized.contains("按一次即可开始说话"),
+           normalized.contains("再按任意键可结束"),
+           let modeRange = normalized.range(of: "免按模式") {
+            let modeText = String(normalized[modeRange.upperBound...])
+            guard let startRange = modeText.range(of: "按一次即可开始说话"),
+                  let endingRange = modeText.range(
+                      of: "再按任意键可结束",
+                      range: startRange.upperBound..<modeText.endIndex
+                  ) else { return nil }
+            let selectedKeyArea = String(modeText[..<startRange.lowerBound]) +
+                String(modeText[endingRange.upperBound...])
+            guard let candidate = uniqueVisibleKeyCandidate(in: selectedKeyArea) else { return nil }
+            return candidate == "fn" ? .fnToggle : .unsupported(displayName(for: candidate))
+        }
+
+        guard normalized.contains("长按模式"),
+              normalized.contains("按住说话"),
+              let modeRange = normalized.range(of: "长按模式") else { return nil }
+        let modeText = String(normalized[modeRange.upperBound...])
+        guard let pressRange = modeText.range(of: "按住说话") else { return nil }
+        let releaseRanges = ["松手结束", "松开结束"].compactMap { token in
+            modeText.range(of: token, range: pressRange.upperBound..<modeText.endIndex)
+        }
+        guard let releaseRange = releaseRanges.min(by: { $0.lowerBound < $1.lowerBound }) else { return nil }
+        let selectedKeyArea = String(modeText[..<pressRange.lowerBound]) +
+            String(modeText[releaseRange.upperBound...])
+        guard let candidate = uniqueVisibleKeyCandidate(in: selectedKeyArea) else { return nil }
+        return candidate == "leftcontrol" ? .leftControlHold : .unsupported(displayName(for: candidate))
     }
 
     private static func modeGroups(in windows: [[String]]) -> [[String]] {
@@ -317,11 +353,15 @@ enum DoubaoShortcutSettingsReader {
         }
     }
 
-    private static func hasToggleInstructions(_ text: String) -> Bool {
+    private static func hasShortcutModeInstructions(_ text: String) -> Bool {
         let normalized = text.lowercased().filter { !$0.isWhitespace }
-        return normalized.contains("免按模式") &&
+        let hasFnToggleInstructions = normalized.contains("免按模式") &&
             normalized.contains("按一次即可开始说话") &&
             normalized.contains("再按任意键可结束")
+        let hasLongPressInstructions = normalized.contains("长按模式") &&
+            normalized.contains("按住说话") &&
+            (normalized.contains("松手结束") || normalized.contains("松开结束"))
+        return hasFnToggleInstructions || hasLongPressInstructions
     }
 
     private static func candidateCategorySummary(_ modes: [DoubaoShortcutMode]) -> String {
@@ -382,11 +422,42 @@ enum DoubaoShortcutSettingsReader {
         return false
     }
 
+    private static func uniqueVisibleKeyCandidate(in text: String) -> String? {
+        let normalized = text.lowercased().filter { !$0.isWhitespace }
+        var candidates = Set<String>()
+
+        if explicitLeftControlTokens.contains(where: { containsVisibleToken($0, in: normalized) }) {
+            candidates.insert("leftcontrol")
+        }
+        if explicitRightControlTokens.contains(where: { containsVisibleToken($0, in: normalized) }) {
+            candidates.insert("rightcontrol")
+        }
+        if candidates.isEmpty,
+           ["control", "ctrl", "⌃"].contains(where: { containsVisibleToken($0, in: normalized) }) {
+            candidates.insert("control")
+        }
+        for token in visibleKeyTokens where containsVisibleToken(token, in: normalized) {
+            candidates.insert(token)
+        }
+
+        guard candidates.count == 1 else { return nil }
+        return candidates.first
+    }
+
+    private static func displayName(for candidate: String) -> String {
+        switch candidate {
+        case "leftcontrol": return "left control"
+        case "rightcontrol": return "right control"
+        case "control": return "control"
+        default: return candidate
+        }
+    }
+
     private static func isExplicitLeftControlDisplay(_ value: String) -> Bool {
-        let normalized = value.lowercased()
-        return normalized.contains("left control") || normalized.contains("left ctrl") ||
+        let normalized = value.lowercased().filter { !$0.isWhitespace }
+        return normalized.contains("leftcontrol") || normalized.contains("leftctrl") ||
             normalized.contains("左control") || normalized.contains("左ctrl") ||
-            normalized.contains("左⌃")
+            normalized.contains("left⌃") || normalized.contains("左⌃")
     }
 
     private struct SettingsTextSnapshot {
@@ -416,8 +487,7 @@ enum DoubaoShortcutSettingsReader {
             var rawValue: CFTypeRef?
             guard AXUIElementCopyAttributeValue(element, attribute as CFString, &rawValue) == .success,
                   let text = rawValue as? String else { continue }
-            let lowercased = text.lowercased()
-            if shortcutTextMarkers.contains(where: lowercased.contains) {
+            if shouldCollectShortcutText(text) {
                 fragments.append(text)
             }
         }

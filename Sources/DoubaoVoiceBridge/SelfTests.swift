@@ -66,6 +66,15 @@ enum SelfTests {
             check(state.phase, .idle, "native Fn chord leaves toggle state idle")
             _ = state.handle(.fnDown(targetAvailable: true, conflictingModifiersPresent: false))
             check(
+                state.handle(.otherKeyUp),
+                [.restoreFnPassthrough, .passThrough],
+                "a key released after Fn went down aborts the pending click and passes its release"
+            )
+            check(state.phase, .idle, "pre-existing key release leaves Fn idle")
+            check(state.handle(.fnUp), [.passThrough], "the later physical Fn release stays native after the chord abort")
+            check(state.phase, .idle, "an aborted Fn chord cannot start dictation on release")
+            _ = state.handle(.fnDown(targetAvailable: true, conflictingModifiersPresent: false))
+            check(
                 state.handle(.fnUp),
                 [.suppress, .beginDictation],
                 "Fn release confirms a standalone click and begins dictation"
@@ -339,6 +348,13 @@ enum SelfTests {
                 "actual AX settings text reads the bounded Fn key after the any-key instruction"
             )
             check(
+                DoubaoShortcutSettingsReader.mode(
+                    fromVisibleSettingsText: "语音输入模式 长按模式 按住说话，松手结束 左 Control 免按模式 按一次即可开始说话，再按任意键可结束"
+                ),
+                .leftControlHold,
+                "visible left Control long-press is detected when the Fn mode has no selected key"
+            )
+            check(
                 DoubaoShortcutSettingsReader.visibleModeCandidates(in: [[
                     "长按模式", "按住说话，松手结束", "点击设置", "免按模式",
                     "按一次即可开始说话", "再按任意键可结束", "Fn", "全局唤起语音",
@@ -346,6 +362,104 @@ enum SelfTests {
                 ]]),
                 [.fnToggle],
                 "split setting nodes aggregate only within the selected mode field"
+            )
+            check(
+                DoubaoShortcutSettingsReader.visibleModeCandidates(in: [[
+                    "长按模式", "按住说话，松手结束", "Left Control"
+                ]]),
+                [.leftControlHold],
+                "AX title, instruction and left Control value aggregate across nodes"
+            )
+            check(
+                DoubaoShortcutSettingsReader.mode(
+                    fromVisibleSettingsText: "长按模式 按住说话，松手结束 Left ⌃"
+                ),
+                .leftControlHold,
+                "visible left Control glyph is canonicalized to the supported trigger"
+            )
+            check(
+                DoubaoShortcutSettingsReader.shouldCollectShortcutText("Left Control"),
+                true,
+                "AX collection keeps a standalone English Left Control value"
+            )
+            check(
+                DoubaoShortcutSettingsReader.shouldCollectShortcutText("左 Control"),
+                true,
+                "AX collection keeps a standalone Chinese left Control value"
+            )
+            check(
+                DoubaoShortcutSettingsReader.shouldCollectShortcutText("⌃"),
+                true,
+                "AX collection keeps a standalone Control glyph"
+            )
+            check(
+                DoubaoShortcutSettingsReader.shouldCollectShortcutText("Shift"),
+                true,
+                "AX collection keeps a standalone modifier value"
+            )
+            check(
+                DoubaoShortcutSettingsReader.mode(
+                    fromVisibleSettingsText: "长按模式 按住说话，松手结束 ⌃"
+                ),
+                .unsupported("control"),
+                "a bare Control glyph is not assumed to mean left Control"
+            )
+            check(
+                DoubaoShortcutSettingsReader.mode(
+                    fromVisibleSettingsText: "长按模式 按住说话，松手结束 Right ⌃"
+                ),
+                .unsupported("right control"),
+                "a right Control glyph is not treated as left Control"
+            )
+            check(
+                DoubaoShortcutSettingsReader.mode(
+                    fromVisibleSettingsText: "长按模式 按住说话，松手结束 Right Control"
+                ),
+                .unsupported("right control"),
+                "visible right Control is never mistaken for left Control"
+            )
+            check(
+                DoubaoShortcutSettingsReader.mode(
+                    fromVisibleSettingsText: "长按模式 按住说话，松手结束 Control"
+                ),
+                .unsupported("control"),
+                "a generic Control label is not assumed to mean left Control"
+            )
+            check(
+                DoubaoShortcutSettingsReader.mode(
+                    fromVisibleSettingsText: "长按模式 按住说话，松手结束 Left Control + Shift"
+                ),
+                nil,
+                "a Control modifier chord is not treated as the supported single-key shortcut"
+            )
+            check(
+                DoubaoShortcutSettingsReader.visibleModeCandidates(in: [[
+                    "长按模式", "按住说话", "松手结束", "Left Control", "+", "Shift"
+                ]]),
+                [],
+                "AX filtering retains split Control and Shift values and rejects their chord"
+            )
+            check(
+                DoubaoShortcutSettingsReader.visibleModeCandidates(in: [[
+                    "长按模式", "按住说话，松手结束", "全局唤起语音", "Left Control"
+                ]]),
+                [],
+                "an unrelated global shortcut stays outside the long-press settings group"
+            )
+            check(
+                DoubaoShortcutSettingsReader.visibleModeCandidates(in: [[
+                    "长按模式", "按住说话，松手结束", "左 Control", "免按模式",
+                    "按一次即可开始说话", "再按任意键可结束", "Fn"
+                ]]),
+                [.leftControlHold, .fnToggle],
+                "separate active long-press and Fn modes remain distinct candidates"
+            )
+            check(
+                DoubaoShortcutSettingsReader.mode(
+                    fromVisibleSettingsText: "长按模式 按住说话，松手结束 左 Control 免按模式 按一次即可开始说话，再按任意键可结束 Fn"
+                ),
+                nil,
+                "whole settings text with two active shortcut modes is ambiguous"
             )
             check(
                 DoubaoShortcutSettingsReader.visibleModeCandidates(in: [
@@ -577,6 +691,59 @@ enum SelfTests {
             check(independentProfile.usesFnBridge, false, "independent Control bridge does not intercept physical Fn")
             check(independentProfile.usesLeftControlBridge, true, "independent bridge captures left Control")
             check(independentProfile.isSupported, true, "Fn Doubao with Control bridge is a supported profile")
+            check(followProfile.supportsManualComposerEntry, false, "Fn-follow profile cannot open an unfinishable manual session")
+            check(independentProfile.supportsManualComposerEntry, false, "independent Control-to-Fn profile cannot bypass its trigger lifecycle")
+
+            let controlProfile = ShortcutProfile(
+                doubao: DoubaoShortcutConfiguration(mode: .leftControlHold, source: .manual, observedAt: Date()),
+                bridge: .followDoubao
+            )
+            check(controlProfile.supportsManualComposerEntry, true, "left Control profile keeps manual composer entry")
+            let refreshedControlProfile = ShortcutProfile(
+                doubao: DoubaoShortcutConfiguration(
+                    mode: .leftControlHold,
+                    source: .preferences("test"),
+                    observedAt: Date()
+                ),
+                bridge: .followDoubao
+            )
+            check(
+                ShortcutProfile.hasSameTriggerBehavior(controlProfile, refreshedControlProfile),
+                true,
+                "a source-only refresh does not count as a shortcut behavior change"
+            )
+            check(
+                ShortcutTriggerReadiness.status(profile: controlProfile, setupPending: false, monitorActive: false),
+                nil,
+                "readiness is unavailable before the event tap starts"
+            )
+            check(
+                ShortcutTriggerReadiness.status(profile: controlProfile, setupPending: true, monitorActive: true),
+                nil,
+                "a supported profile is not ready while setup remains pending"
+            )
+            check(
+                ShortcutTriggerReadiness.status(profile: controlProfile, setupPending: false, monitorActive: true),
+                "就绪 · 长按左 Control 开始，松开结束；豆包：长按左 ⌃ 说话，松开自动发送",
+                "readiness is published only for a supported profile with an active event tap"
+            )
+
+            let unsupportedProfile = ShortcutProfile(
+                doubao: DoubaoShortcutConfiguration(mode: .disabled, source: .manual, observedAt: Date()),
+                bridge: .followDoubao
+            )
+            check(unsupportedProfile.supportsManualComposerEntry, false, "disabled profiles cannot enter manual composer")
+
+            let coordinator = SessionCoordinator()
+            var statusChanges: [String] = []
+            coordinator.onStatusChange = { text, _ in statusChanges.append(text) }
+            coordinator.updateShortcutProfile(controlProfile)
+            coordinator.updateShortcutProfile(refreshedControlProfile)
+            check(
+                statusChanges,
+                [],
+                "repeated profile refresh does not publish readiness over an existing error status"
+            )
 
             let syntheticFnDownFlags = SyntheticShortcutEventFlags.fnToggle(down: true)
             check(syntheticFnDownFlags.contains(.maskSecondaryFn), true, "synthetic Doubao Fn down carries Fn")

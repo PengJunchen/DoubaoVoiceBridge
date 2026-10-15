@@ -101,6 +101,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             onCancel: { [weak self] in self?.coordinator.cancel() }
         )
         self.monitor = monitor
+        coordinator.readyStatusProvider = { [weak self] in
+            guard let self else { return nil }
+            return ShortcutTriggerReadiness.status(
+                profile: self.shortcutProfile,
+                setupPending: self.setupPending,
+                monitorActive: self.monitor?.activeTapLocation != nil
+            )
+        }
         coordinator.onUserCancelRequested = { [weak self] metadata in
             guard let self else { return }
             if let monitor = self.monitor {
@@ -211,7 +219,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let manual = NSMenuItem(title: "手动打开听写框", action: #selector(openComposerManually), keyEquivalent: "")
         manual.target = self
-        manual.isEnabled = shortcutProfile?.isSupported == true
+        manual.isEnabled = shortcutProfile?.supportsManualComposerEntry == true
         menu.addItem(manual)
 
         let setup = NSMenuItem(title: "设置豆包与远控按键…", action: #selector(openShortcutSettingsFromMenu), keyEquivalent: "")
@@ -249,6 +257,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func openComposerManually() {
         guard let shortcutProfile, shortcutProfile.isSupported else {
             setStatus("尚未完成豆包与远控快捷键配置", isError: true)
+            return
+        }
+        guard shortcutProfile.supportsManualComposerEntry else {
+            setStatus("Fn 免按模式请使用已配置的触发键打开听写框", isError: true)
             return
         }
         guard let target = currentUURemoteTarget() else {
@@ -383,27 +395,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func startMonitorOrRequestPermissions(promptIfNeeded: Bool) {
-        guard let monitor, monitor.activeTapLocation == nil else { return }
+        guard let monitor else { return }
         guard !setupPending, let profile = shortcutProfile, profile.isSupported else {
             setStatus("尚未完成豆包与远控快捷键配置", isError: true)
             return
         }
-        do {
-            try monitor.start()
-            permissionRetryTimer?.invalidate()
-            permissionRetryTimer = nil
-            setStatus("就绪 · \(profile.bridgeInstruction)", isError: false)
-        } catch {
-            logger.error("Unable to start control monitor: \(error.localizedDescription, privacy: .public)")
-            setStatus("快捷键已识别；需要开启辅助功能与输入监控权限", isError: true)
-            if promptIfNeeded {
-                requestRequiredPermissions()
-            }
-            if permissionRetryTimer == nil {
-                permissionRetryTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-                    self?.startMonitorOrRequestPermissions(promptIfNeeded: false)
+        if monitor.activeTapLocation == nil {
+            do {
+                try monitor.start()
+            } catch {
+                logger.error("Unable to start control monitor: \(error.localizedDescription, privacy: .public)")
+                setStatus("快捷键已识别；需要开启辅助功能与输入监控权限", isError: true)
+                if promptIfNeeded {
+                    requestRequiredPermissions()
                 }
+                if permissionRetryTimer == nil {
+                    permissionRetryTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+                        self?.startMonitorOrRequestPermissions(promptIfNeeded: false)
+                    }
+                }
+                return
             }
+        }
+        permissionRetryTimer?.invalidate()
+        permissionRetryTimer = nil
+        if let readyStatus = ShortcutTriggerReadiness.status(
+            profile: profile,
+            setupPending: setupPending,
+            monitorActive: monitor.activeTapLocation != nil
+        ) {
+            setStatus(readyStatus, isError: false)
         }
     }
 
@@ -484,10 +505,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ first: ShortcutProfile?,
         _ second: ShortcutProfile?
     ) -> Bool {
-        guard let first, let second else { return first == nil && second == nil }
-        return first.doubao.mode == second.doubao.mode &&
-            first.doubao.source == second.doubao.source &&
-            first.bridge.kind == second.bridge.kind
+        ShortcutProfile.hasSameTriggerBehavior(first, second)
     }
 
     private func observeEventTapChanges() {

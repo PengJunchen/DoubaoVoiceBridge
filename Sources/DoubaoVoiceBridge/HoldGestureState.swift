@@ -80,6 +80,7 @@ enum FnToggleInput {
     case fnDown(targetAvailable: Bool, conflictingModifiersPresent: Bool = false)
     case fnUp
     case otherKeyDown
+    case otherKeyUp
     case localFnDownPosted
     case localFnTapPosted
     case cancel
@@ -113,18 +114,18 @@ struct FnToggleGestureState {
         case (.pendingClick, .fnUp):
             phase = .starting
             return [.suppress, .beginDictation]
-        case (.pendingClick, .otherKeyDown):
+        case (.pendingClick, .otherKeyDown), (.pendingClick, .otherKeyUp):
             phase = .idle
             return [.restoreFnPassthrough, .passThrough]
         case (.pendingClick, .cancel):
             phase = .idle
             return [.passThrough]
-        case (.starting, .fnDown), (.starting, .fnUp):
+        case (.starting, .fnDown), (.starting, .fnUp), (.starting, .otherKeyUp):
             return [.suppress]
         case (.dictating, .fnDown), (.dictating, .otherKeyDown):
             phase = .stopping
             return [.suppress, .finishDictation]
-        case (.dictating, .fnUp):
+        case (.dictating, .fnUp), (.dictating, .otherKeyUp):
             return [.suppress]
         case (.starting, .localFnTapPosted):
             phase = .dictating
@@ -140,11 +141,11 @@ struct FnToggleGestureState {
         case (.stopping, .cancel):
             phase = .idle
             return [.cancelDictation]
-        case (.idle, .fnUp), (.idle, .otherKeyDown), (.idle, .localFnDownPosted), (.idle, .localFnTapPosted),
+        case (.idle, .fnUp), (.idle, .otherKeyDown), (.idle, .otherKeyUp), (.idle, .localFnDownPosted), (.idle, .localFnTapPosted),
              (.idle, .cancel),
              (.pendingClick, .fnDown), (.pendingClick, .localFnDownPosted), (.pendingClick, .localFnTapPosted),
              (.dictating, .localFnDownPosted), (.dictating, .localFnTapPosted),
-             (.stopping, .fnDown), (.stopping, .fnUp), (.stopping, .otherKeyDown),
+             (.stopping, .fnDown), (.stopping, .fnUp), (.stopping, .otherKeyDown), (.stopping, .otherKeyUp),
              (.stopping, .localFnDownPosted), (.stopping, .localFnTapPosted):
             return phase == .stopping ? [.suppress] : [.passThrough]
         }

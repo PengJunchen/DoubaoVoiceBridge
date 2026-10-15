@@ -12,6 +12,7 @@ final class SessionCoordinator {
 
     var onStatusChange: ((String, Bool) -> Void)?
     var onUserCancelRequested: ((ComposerInputEventMetadata) -> Void)?
+    var readyStatusProvider: (() -> String?)?
 
     private let panel = ComposerPanelController()
     private let delivery = UURemoteDelivery()
@@ -54,9 +55,6 @@ final class SessionCoordinator {
 
     func updateShortcutProfile(_ profile: ShortcutProfile?) {
         activeShortcutProfile = profile
-        if canBegin {
-            onStatusChange?(readyStatus, false)
-        }
     }
 
     func begin(target: UURemoteTarget, profile: ShortcutProfile) {
@@ -100,13 +98,15 @@ final class SessionCoordinator {
         self.target = nil
         sessionShortcutProfile = nil
         state = .idle
-        let status: (String, Bool)
+        let status: (String, Bool)?
         if shouldStopLocalFnDictation && !localStopSucceeded {
             status = ("已取消；无法确认豆包语音已停止，请检查本机识别状态", true)
         } else if shouldStopLocalFnDictation {
             status = ("已取消；已向本机豆包听写框发送停止键", false)
-        } else {
+        } else if let readyStatus = readyStatusProvider?() {
             status = (readyStatus, false)
+        } else {
+            status = ("已取消", false)
         }
 
         if shouldStopLocalFnDictation && localStopSucceeded {
@@ -119,7 +119,7 @@ final class SessionCoordinator {
                     frontmostBeforeCancel: frontmostBeforeCancel,
                     target: target
                 )
-                self.onStatusChange?(status.0, status.1)
+                if let status { self.onStatusChange?(status.0, status.1) }
             }
             return
         }
@@ -129,7 +129,7 @@ final class SessionCoordinator {
             frontmostBeforeCancel: frontmostBeforeCancel,
             target: target
         )
-        onStatusChange?(status.0, status.1)
+        if let status { onStatusChange?(status.0, status.1) }
     }
 
     private func restoreFocusIfBridgeStillOwnsIt(
@@ -191,7 +191,9 @@ final class SessionCoordinator {
                 if self.state == .delivering {
                     self.state = .idle
                     self.sessionShortcutProfile = nil
-                    self.onStatusChange?(self.readyStatus, false)
+                    if let readyStatus = self.readyStatusProvider?() {
+                        self.onStatusChange?(readyStatus, false)
+                    }
                 }
             }
         )
@@ -208,10 +210,4 @@ final class SessionCoordinator {
         }
     }
 
-    private var readyStatus: String {
-        guard let profile = activeShortcutProfile, profile.isSupported else {
-            return "尚未完成豆包与远控快捷键配置"
-        }
-        return "就绪 · \(profile.bridgeInstruction)；豆包：\(profile.doubaoInstruction)"
-    }
 }

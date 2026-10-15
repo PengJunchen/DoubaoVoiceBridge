@@ -322,6 +322,11 @@ final class ControlHoldMonitor {
         if type == .keyUp, suppressedFnKeyUps.consumeKeyUp(keyCode) {
             return nil
         }
+        if type == .keyUp, fnGesture.phase == .pendingClick {
+            logger.notice("Pending Fn click cancelled by an already-pressed key release")
+            abortPendingFnClick(proxy: proxy, input: .otherKeyUp)
+            return Unmanaged.passUnretained(event)
+        }
 
         if type == .flagsChanged {
             let wasDown = physicalModifierKeyCodes.contains(keyCode)
@@ -442,9 +447,14 @@ final class ControlHoldMonitor {
         return nil
     }
 
-    private func abortPendingFnClick(proxy: CGEventTapProxy) {
+    private func abortPendingFnClick(
+        proxy: CGEventTapProxy,
+        input: FnToggleInput = .otherKeyDown
+    ) {
         guard fnGesture.phase == .pendingClick else { return }
         logger.notice("Fn chord detected before release; restoring the native Fn modifier")
+        let effects = fnGesture.handle(input)
+        guard effects.contains(.restoreFnPassthrough) else { return }
         fnCompanionKeySuppression.disarm()
         fnGesture.reset()
         target = nil

@@ -55,12 +55,33 @@ struct ShortcutProfile: Equatable {
             (bridge.kind == .followDoubao && doubao.mode == .leftControlHold)
     }
 
+    var supportsManualComposerEntry: Bool {
+        isSupported && doubao.mode == .leftControlHold
+    }
+
     var bridgeInstruction: String {
         if usesFnBridge { return "按 Fn 开始，再按任意键结束" }
         return "长按左 Control 开始，松开结束"
     }
 
     var doubaoInstruction: String { doubao.mode.instruction }
+
+    static func hasSameTriggerBehavior(_ first: ShortcutProfile?, _ second: ShortcutProfile?) -> Bool {
+        guard let first, let second else { return first == nil && second == nil }
+        return first.doubao.mode == second.doubao.mode && first.bridge.kind == second.bridge.kind
+    }
+}
+
+enum ShortcutTriggerReadiness {
+    static func status(
+        profile: ShortcutProfile?,
+        setupPending: Bool,
+        monitorActive: Bool
+    ) -> String? {
+        guard !setupPending, monitorActive,
+              let profile, profile.isSupported else { return nil }
+        return "就绪 · \(profile.bridgeInstruction)；豆包：\(profile.doubaoInstruction)"
+    }
 }
 
 struct ShortcutConfigurationStore {
