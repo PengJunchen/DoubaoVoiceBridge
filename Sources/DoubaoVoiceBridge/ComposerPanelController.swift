@@ -1,5 +1,22 @@
 import AppKit
+import ApplicationServices
 import os.log
+
+struct ComposerInputEventMetadata {
+    let type: UInt
+    let keyCode: UInt16
+    let flags: UInt
+    let sourcePID: Int64
+
+    var flagsHex: String { String(flags, radix: 16) }
+
+    init(event: NSEvent) {
+        type = event.type.rawValue
+        keyCode = event.keyCode
+        flags = event.modifierFlags.rawValue
+        sourcePID = event.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID) ?? -1
+    }
+}
 
 final class DictationPanel: NSPanel {
     override var canBecomeKey: Bool { true }
@@ -7,9 +24,11 @@ final class DictationPanel: NSPanel {
 }
 
 final class ComposerTextView: NSTextView {
+    private let logger = Logger(subsystem: "com.lyp.DoubaoVoiceBridge", category: "composer")
     var onCommit: (() -> Void)?
-    var onCancel: (() -> Void)?
+    var onCancel: ((ComposerInputEventMetadata) -> Void)?
     var onControlReleased: (() -> Void)?
+    var observesControlRelease = false
 
     override func keyDown(with event: NSEvent) {
         let isReturn = event.keyCode == 36 || event.keyCode == 76
@@ -21,7 +40,9 @@ final class ComposerTextView: NSTextView {
             return
         }
         if event.keyCode == 53 {
-            onCancel?()
+            let metadata = ComposerInputEventMetadata(event: event)
+            logger.notice("Composer cancellation requested type=\(metadata.type, privacy: .public) keyCode=\(metadata.keyCode, privacy: .public) flags=0x\(metadata.flagsHex, privacy: .public) sourcePID=\(metadata.sourcePID, privacy: .public)")
+            onCancel?(metadata)
             return
         }
         super.keyDown(with: event)
@@ -29,7 +50,7 @@ final class ComposerTextView: NSTextView {
 
     override func flagsChanged(with event: NSEvent) {
         super.flagsChanged(with: event)
-        if event.keyCode == 59, !event.modifierFlags.contains(.control) {
+        if observesControlRelease, event.keyCode == 59, !event.modifierFlags.contains(.control) {
             onControlReleased?()
         }
     }
@@ -82,7 +103,7 @@ enum TranscriptSettlePolicy {
 
 final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
     var onCommit: ((String) -> Void)?
-    var onCancel: (() -> Void)?
+    var onCancel: ((ComposerInputEventMetadata) -> Void)?
     var onControlReleased: (() -> Void)?
     var onTranscriptTimeout: (() -> Void)?
 
@@ -99,6 +120,7 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
     private var lastLoggedMarkedState = false
     private var isWaitingForFinalTranscript = false
     private var acceptsTranscriptUpdates = false
+    private var shortcutInstruction = ""
 
     init() {
         let panel = DictationPanel(
@@ -125,7 +147,11 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func begin(targetDescription: String) {
+    func begin(
+        targetDescription: String,
+        shortcutInstruction: String,
+        observesControlRelease: Bool
+    ) {
         sessionID = UUID()
         cancelSettleTimer()
         textView.string = ""
@@ -133,10 +159,12 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
         lastLoggedMarkedState = false
         isWaitingForFinalTranscript = false
         acceptsTranscriptUpdates = true
+        self.shortcutInstruction = shortcutInstruction
+        textView.observesControlRelease = observesControlRelease
         textView.isEditable = true
         lastTextChangeAt = Date()
         targetLabel.stringValue = targetDescription
-        statusLabel.stringValue = "正在启动豆包语音输入法…按住左 ⌃ 说话，松开后自动发送"
+        statusLabel.stringValue = "正在启动豆包语音输入法…\(shortcutInstruction)"
         statusLabel.textColor = .secondaryLabelColor
 
         guard let window else { return }
@@ -147,7 +175,7 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
         ComposerTextLayout.synchronize(textView, with: scrollView)
         window.makeFirstResponder(textView)
         logger.notice(
-            "Composer ready session=\(self.shortSessionID, privacy: .public) textWidth=\(self.textView.frame.width, privacy: .public) containerWidth=\(self.textView.textContainer?.containerSize.width ?? 0, privacy: .public)"
+            "Composer ready session=\(self.shortSessionID, privacy: .public) appActive=\(NSApp.isActive, privacy: .public) windowVisible=\(window.isVisible, privacy: .public) windowKey=\(window.isKeyWindow, privacy: .public) firstResponderIsTextView=\(window.firstResponder === self.textView, privacy: .public) textWidth=\(self.textView.frame.width, privacy: .public) containerWidth=\(self.textView.textContainer?.containerSize.width ?? 0, privacy: .public)"
         )
     }
 
@@ -164,7 +192,7 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
         isWaitingForFinalTranscript = false
         acceptsTranscriptUpdates = false
         cancelSettleTimer()
-        statusLabel.stringValue = "识别完成，正在同步到 Mac mini…"
+        statusLabel.stringValue = "识别完成，正在同步到 UU 远控…"
         statusLabel.textColor = .secondaryLabelColor
         textView.isEditable = false
         window?.makeFirstResponder(nil)
@@ -201,6 +229,28 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
             (textView.textContainer?.containerSize.width ?? 0) > 0
     }
 
+    @discardableResult
+    func stopFnToggleDictationForCancellation() -> Bool {
+        guard let window, window.isVisible else { return false }
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.contentView?.layoutSubtreeIfNeeded()
+        guard window.makeFirstResponder(textView), isReadyForLocalDictation,
+              let source = CGEventSource(stateID: .combinedSessionState),
+              let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 105, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 105, keyDown: false) else {
+            return false
+        }
+        keyDown.setIntegerValueField(.eventSourceUserData, value: ControlHoldMonitor.syntheticEventMarker)
+        keyUp.setIntegerValueField(.eventSourceUserData, value: ControlHoldMonitor.syntheticEventMarker)
+        keyDown.flags = []
+        keyUp.flags = []
+        let processID = ProcessInfo.processInfo.processIdentifier
+        keyDown.postToPid(processID)
+        keyUp.postToPid(processID)
+        return true
+    }
+
     func textDidChange(_ notification: Notification) {
         lastTextChangeAt = Date()
         let length = textView.string.utf16.count
@@ -220,8 +270,8 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
                     : "已收到识别文字，正在准备自动发送…"
             } else {
                 statusLabel.stringValue = marked
-                    ? "豆包语音输入法正在识别…按住左 ⌃ 继续说话"
-                    : "已收到识别文字，松开左 ⌃ 后自动发送"
+                    ? "豆包语音输入法正在识别…\(shortcutInstruction)"
+                    : "已收到识别文字，\(shortcutInstruction)"
             }
         }
     }
@@ -251,7 +301,7 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.textContainerInset = NSSize(width: 12, height: 10)
         textView.onCommit = { [weak self] in self?.commitCurrentText() }
-        textView.onCancel = { [weak self] in self?.onCancel?() }
+        textView.onCancel = { [weak self] metadata in self?.onCancel?(metadata) }
         textView.onControlReleased = { [weak self] in self?.onControlReleased?() }
 
         ComposerTextLayout.attach(textView, to: scrollView)
