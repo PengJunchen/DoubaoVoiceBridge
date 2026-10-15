@@ -112,6 +112,7 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
     private let doubaoRecordButton = NSButton(title: "录制豆包按键…", target: nil, action: nil)
     private let bridgeRecordButton = NSButton(title: "录制远控触发键…", target: nil, action: nil)
     private let automaticSummary = NSTextField(wrappingLabelWithString: "")
+    private let bridgeSummary = NSTextField(wrappingLabelWithString: "")
     private let permissionsSummary = NSTextField(wrappingLabelWithString: "")
     private let messageLabel = NSTextField(wrappingLabelWithString: "")
     private let saveButton = NSButton(title: "保存并启用", target: nil, action: nil)
@@ -223,8 +224,10 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
         bridgePopup.action = #selector(selectionChanged)
         bridgePopup.selectItem(at: initialBridgeKind == .leftControlHold ? 1 : (initialBridgeKind == .customHold ? 2 : 0))
 
-        automaticSummary.maximumNumberOfLines = 3
+        automaticSummary.maximumNumberOfLines = 4
         automaticSummary.textColor = .secondaryLabelColor
+        bridgeSummary.maximumNumberOfLines = 4
+        bridgeSummary.textColor = .secondaryLabelColor
         permissionsSummary.maximumNumberOfLines = 2
         permissionsSummary.textColor = .secondaryLabelColor
         messageLabel.maximumNumberOfLines = 3
@@ -247,16 +250,13 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
             heading.addArrangedSubview(iconView)
         }
         heading.addArrangedSubview(title)
-        let intro = NSTextField(wrappingLabelWithString: "可直接录制豆包语音键和远控触发键；录制结果只保存到本工具，不会修改豆包设置。豆包交互方式单独选择长按松开结束，或单击启动后任意键结束。")
+        let intro = NSTextField(wrappingLabelWithString: "远控触发键只在 UU 前台打开本工具听写框；豆包语音键在听写框就绪后触发豆包。两侧可分别录制；只有远控选择“跟随豆包按键”时才共用按键和交互方式。录制只保存到本工具，不修改豆包设置。")
         intro.textColor = .secondaryLabelColor
-        intro.maximumNumberOfLines = 3
+        intro.maximumNumberOfLines = 4
 
-        let sourceLabel = makeSectionLabel("豆包语音按键")
+        let sourceLabel = makeSectionLabel("豆包语音键")
         let modeLabel = makeSectionLabel("豆包语音交互方式")
-        let bridgeLabel = makeSectionLabel("远控听写触发键")
-        let bridgeInstruction = NSTextField(wrappingLabelWithString: "自定义远控触发键按住开始、松开结束；选择“跟随豆包”时沿用豆包自己的开始方式。")
-        bridgeInstruction.textColor = .secondaryLabelColor
-        bridgeInstruction.maximumNumberOfLines = 2
+        let bridgeLabel = makeSectionLabel("远控触发键")
         let permissionsLabel = makeSectionLabel("所需权限")
         let permissionsButton = NSButton(title: "打开隐私与安全性设置…", target: self, action: #selector(openPermissions))
         let localTestButton = NSButton(title: "打开 TextEdit 进行本机识别测试…", target: self, action: #selector(openLocalTest))
@@ -264,16 +264,16 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
         let stack = NSStackView(views: [
             heading,
             intro,
-            sourceLabel,
-            sourcePopup,
-            automaticSummary,
-            modeLabel,
-            doubaoRecordButton,
-            doubaoModePopup,
             bridgeLabel,
             bridgePopup,
             bridgeRecordButton,
-            bridgeInstruction,
+            bridgeSummary,
+            sourceLabel,
+            sourcePopup,
+            doubaoRecordButton,
+            automaticSummary,
+            modeLabel,
+            doubaoModePopup,
             localTestButton,
             permissionsLabel,
             permissionsSummary,
@@ -299,7 +299,7 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
         for control in [sourcePopup, doubaoModePopup, bridgePopup] {
             control.widthAnchor.constraint(equalToConstant: 540).isActive = true
         }
-        for field in [intro, automaticSummary, bridgeInstruction, permissionsSummary, messageLabel] {
+        for field in [intro, automaticSummary, bridgeSummary, permissionsSummary, messageLabel] {
             field.widthAnchor.constraint(equalToConstant: 540).isActive = true
         }
         NSLayoutConstraint.activate([
@@ -343,18 +343,19 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
         bridgePopup.isEnabled = !isRecording
         bridgeRecordButton.isEnabled = true
         if manual {
-            automaticSummary.stringValue = "当前使用录制的按键：\(selectedDoubaoShortcut.displayName)。交互方式由下方单独选择；录制只保存本工具配置，不修改豆包设置。"
+            automaticSummary.stringValue = selectedDoubaoMode().map { doubaoSummary(for: $0.0) }
+                ?? "请录制豆包实际使用的按键，并在下方选择交互方式。"
         } else {
             switch sourcePopup.indexOfSelectedItem {
             case 0:
                 if let automaticConfiguration {
-                    automaticSummary.stringValue = "\(automaticConfiguration.instruction)\n\(automaticConfiguration.sourceAndTime)"
+                    automaticSummary.stringValue = doubaoSummary(for: automaticConfiguration)
                 } else {
                     automaticSummary.stringValue = "当前没有可确认的自动读取结果；请选择手动配置。"
                 }
             case 1:
                 if let confirmedConfiguration {
-                    automaticSummary.stringValue = "\(confirmedConfiguration.instruction)\n\(confirmedConfiguration.sourceAndTime)"
+                    automaticSummary.stringValue = doubaoSummary(for: confirmedConfiguration)
                 } else {
                     automaticSummary.stringValue = "当前没有上次确认的按键；请选择手动配置。"
                 }
@@ -362,6 +363,7 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
                 automaticSummary.stringValue = "当前没有可确认的自动读取结果；请选择手动配置。"
             }
         }
+        updateBridgeSummary()
 
         let accessibilityGranted = AXIsProcessTrusted()
         let inputGranted = CGPreflightListenEventAccess()
@@ -369,6 +371,36 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
         messageLabel.stringValue = "本机测试入口会打开 TextEdit；请在其中新建空白文稿，用豆包自己的按键验证真实识别。远程粘贴仍需另行在 UU 远控中验证。"
         updateSaveButtonState()
         updateRecorderTitles()
+    }
+
+    private func doubaoSummary(for configuration: DoubaoShortcutConfiguration) -> String {
+        let interaction: String
+        switch configuration.mode {
+        case .fnToggle:
+            interaction = "单击开始，任意键结束"
+        case .leftControlHold:
+            interaction = "按住开始，松开结束"
+        case .disabled, .unsupported:
+            interaction = configuration.mode.instruction
+        }
+        return "豆包语音键：\(configuration.keyboardShortcut.displayName)；\(interaction)。本工具听写框就绪后，才会把此键发送给豆包。\(configuration.sourceAndTime)"
+    }
+
+    private func updateBridgeSummary() {
+        switch selectedBridge().kind {
+        case .followDoubao:
+            guard let doubao = selectedDoubaoMode()?.0 else {
+                bridgeSummary.stringValue = "跟随豆包按键：当前豆包语音键尚未设置。UU 在前台时，此选择会用豆包语音键打开本工具听写框；完成豆包配置后会显示实际按键。"
+                return
+            }
+            let interaction = doubao.mode == .fnToggle ? "单击开始，任意键结束" : "按住开始，松开结束"
+            bridgeSummary.stringValue = "远控触发键：\(doubao.keyboardShortcut.displayName)（跟随豆包）。UU 在前台时用它打开本工具听写框；按键和交互方式与豆包语音键共用：\(interaction)。"
+        case .leftControlHold:
+            bridgeSummary.stringValue = "远控触发键：Left ⌃（独立设置）。UU 在前台时按住它打开本工具听写框，松开结束；豆包语音键单独设置。"
+        case .customHold:
+            let key = selectedBridgeShortcut?.displayName ?? "未录制"
+            bridgeSummary.stringValue = "远控触发键：\(key)（独立设置）。UU 在前台时按住它打开本工具听写框，松开结束；豆包语音键单独设置。"
+        }
     }
 
     private func selectedDoubaoMode() -> (DoubaoShortcutConfiguration, DoubaoShortcutMode?)? {
