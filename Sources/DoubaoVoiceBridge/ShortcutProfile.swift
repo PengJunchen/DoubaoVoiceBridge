@@ -201,7 +201,7 @@ struct BridgeShortcutConfiguration: Equatable {
         guard doubao.mode.isSupported else { return "请先选择豆包支持的语音按键与开始方式" }
         if let error = doubao.shortcut?.doubaoValidationError { return error }
         if kind == .followDoubao, doubao.shortcut != nil {
-            return "豆包使用自定义按键时，请单独录制远控触发键"
+            return "豆包使用自定义按键时，请点击“录制远控触发键”单独录制；自定义远控键按住开始、松开结束"
         }
         if kind == .customHold {
             guard let shortcut else { return "请先录制远控触发键" }

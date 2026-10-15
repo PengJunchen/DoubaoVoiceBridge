@@ -65,6 +65,40 @@ enum ShortcutSaveError: Error {
     }
 }
 
+struct ShortcutSettingsInitialSelection: Equatable {
+    let sourceIndex: Int
+    let configuration: DoubaoShortcutConfiguration?
+
+    static func resolve(
+        automatic: DoubaoShortcutConfiguration?,
+        confirmed: DoubaoShortcutConfiguration?,
+        manual: DoubaoShortcutConfiguration?
+    ) -> ShortcutSettingsInitialSelection {
+        if let manual, manual.mode.isSupported {
+            return ShortcutSettingsInitialSelection(sourceIndex: 2, configuration: manual)
+        }
+        if let automatic, automatic.mode.isSupported {
+            return ShortcutSettingsInitialSelection(sourceIndex: 0, configuration: automatic)
+        }
+        if let confirmed, confirmed.mode.isSupported {
+            return ShortcutSettingsInitialSelection(sourceIndex: 1, configuration: confirmed)
+        }
+        return ShortcutSettingsInitialSelection(sourceIndex: 2, configuration: manual)
+    }
+
+    static func bridgeShortcut(
+        kind: BridgeShortcutKind,
+        doubao: DoubaoShortcutConfiguration?,
+        custom: KeyboardShortcut?
+    ) -> KeyboardShortcut? {
+        switch kind {
+        case .followDoubao: return doubao?.keyboardShortcut
+        case .leftControlHold: return .leftControl
+        case .customHold: return custom
+        }
+    }
+}
+
 final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelegate {
     var onSave: ((DoubaoShortcutConfiguration, DoubaoShortcutMode?, KeyboardShortcut?, BridgeShortcutConfiguration) -> Result<Void, ShortcutSaveError>)?
     var onOpenPermissions: (() -> Void)?
@@ -81,11 +115,12 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
     private let permissionsSummary = NSTextField(wrappingLabelWithString: "")
     private let messageLabel = NSTextField(wrappingLabelWithString: "")
     private let saveButton = NSButton(title: "保存并启用", target: nil, action: nil)
-    private var initialManualMode: DoubaoShortcutMode?
+    private let initialSelection: ShortcutSettingsInitialSelection
     private var initialBridgeKind: BridgeShortcutKind
     private var selectedDoubaoShortcut: KeyboardShortcut
     private var selectedBridgeShortcut: KeyboardShortcut?
     private var recordingTarget: RecordingTarget?
+    private var recordingSelectionSnapshot: RecordingSelectionSnapshot?
     private var localEventMonitor: Any?
     private var recordingModifierKeyCodes: Set<UInt16> = []
     private var recordingUsedMultipleModifiers = false
@@ -97,6 +132,14 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
         case bridge
     }
 
+    private struct RecordingSelectionSnapshot {
+        let sourceIndex: Int
+        let doubaoModeIndex: Int
+        let bridgeIndex: Int
+        let doubaoShortcut: KeyboardShortcut
+        let bridgeShortcut: KeyboardShortcut?
+    }
+
     init(
         automaticConfiguration: DoubaoShortcutConfiguration?,
         confirmedConfiguration: DoubaoShortcutConfiguration?,
@@ -105,10 +148,14 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
     ) {
         self.automaticConfiguration = automaticConfiguration
         self.confirmedConfiguration = confirmedConfiguration
-        self.initialManualMode = manualConfiguration?.mode
+        let initialSelection = ShortcutSettingsInitialSelection.resolve(
+            automatic: automaticConfiguration,
+            confirmed: confirmedConfiguration,
+            manual: manualConfiguration
+        )
+        self.initialSelection = initialSelection
         self.initialBridgeKind = bridgeConfiguration?.kind ?? .followDoubao
-        self.selectedDoubaoShortcut = manualConfiguration?.keyboardShortcut ??
-            confirmedConfiguration?.keyboardShortcut ?? automaticConfiguration?.keyboardShortcut ?? .fn
+        self.selectedDoubaoShortcut = initialSelection.configuration?.keyboardShortcut ?? .fn
         self.selectedBridgeShortcut = bridgeConfiguration?.shortcut
 
         let window = NSWindow(
@@ -146,12 +193,10 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
 
         sourcePopup.addItem(withTitle: automaticConfiguration == nil ? "自动读取（暂不可用）" : "自动读取豆包设置")
         sourcePopup.addItem(withTitle: confirmedConfiguration == nil ? "上次确认（暂不可用）" : "使用上次确认的设置")
-        sourcePopup.addItem(withTitle: "手动选择受支持按键")
+        sourcePopup.addItem(withTitle: "使用录制的按键")
         sourcePopup.target = self
         sourcePopup.action = #selector(selectionChanged)
-        let initialSourceIndex = initialManualMode != nil
-            ? 2
-            : (automaticConfiguration?.mode.isSupported == true ? 0 : (confirmedConfiguration?.mode.isSupported == true ? 1 : 2))
+        let initialSourceIndex = initialSelection.sourceIndex
         sourcePopup.selectItem(at: initialSourceIndex)
         sourcePopup.item(at: 0)?.isEnabled = automaticConfiguration?.mode.isSupported == true
         sourcePopup.item(at: 1)?.isEnabled = confirmedConfiguration?.mode.isSupported == true
@@ -164,7 +209,7 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
         doubaoModePopup.addItem(withTitle: "单击启动，任意键结束")
         doubaoModePopup.target = self
         doubaoModePopup.action = #selector(selectionChanged)
-        let initialMode = initialManualMode ?? confirmedConfiguration?.mode ?? automaticConfiguration?.mode ?? .fnToggle
+        let initialMode = initialSelection.configuration?.mode ?? .fnToggle
         doubaoModePopup.selectItem(at: initialMode == .leftControlHold ? 0 : 1)
         doubaoRecordButton.target = self
         doubaoRecordButton.action = #selector(recordDoubaoShortcut)
@@ -202,7 +247,7 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
             heading.addArrangedSubview(iconView)
         }
         heading.addArrangedSubview(title)
-        let intro = NSTextField(wrappingLabelWithString: "先确认豆包使用的按键和开始方式，再独立选择触发远控听写的按键。手动选择只保存本应用配置，不会修改豆包设置。")
+        let intro = NSTextField(wrappingLabelWithString: "可直接录制豆包语音键和远控触发键；录制结果只保存到本工具，不会修改豆包设置。豆包交互方式单独选择长按松开结束，或单击启动后任意键结束。")
         intro.textColor = .secondaryLabelColor
         intro.maximumNumberOfLines = 3
 
@@ -280,17 +325,25 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
         return field
     }
 
-    @objc private func selectionChanged() {
+    @objc private func selectionChanged(_ sender: Any) {
+        if let popup = sender as? NSPopUpButton, popup === sourcePopup,
+           popup.indexOfSelectedItem != 2,
+           let configuration = configurationForSource(popup.indexOfSelectedItem) {
+            doubaoModePopup.selectItem(at: configuration.mode == .leftControlHold ? 0 : 1)
+        }
         refreshFields()
     }
 
     private func refreshFields() {
         let manual = sourcePopup.indexOfSelectedItem == 2
-        doubaoModePopup.isEnabled = manual
-        doubaoRecordButton.isEnabled = manual
-        bridgeRecordButton.isEnabled = bridgePopup.indexOfSelectedItem == 2
+        let isRecording = recordingTarget != nil
+        sourcePopup.isEnabled = !isRecording
+        doubaoModePopup.isEnabled = manual && !isRecording
+        doubaoRecordButton.isEnabled = true
+        bridgePopup.isEnabled = !isRecording
+        bridgeRecordButton.isEnabled = true
         if manual {
-            automaticSummary.stringValue = "录制豆包当前使用的单键或组合键，并选择长按松开结束，或单击启动后任意键结束。本工具只模拟该按键，不修改豆包设置。"
+            automaticSummary.stringValue = "当前使用录制的按键：\(selectedDoubaoShortcut.displayName)。交互方式由下方单独选择；录制只保存本工具配置，不修改豆包设置。"
         } else {
             switch sourcePopup.indexOfSelectedItem {
             case 0:
@@ -331,6 +384,28 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
         return (.manual(mode, shortcut: selectedDoubaoShortcut), mode)
     }
 
+    private func configurationForSource(_ sourceIndex: Int) -> DoubaoShortcutConfiguration? {
+        switch sourceIndex {
+        case 0: return automaticConfiguration
+        case 1: return confirmedConfiguration
+        default:
+            let mode: DoubaoShortcutMode = doubaoModePopup.indexOfSelectedItem == 0 ? .leftControlHold : .fnToggle
+            return .manual(mode, shortcut: selectedDoubaoShortcut)
+        }
+    }
+
+    private var effectiveDoubaoShortcut: KeyboardShortcut? {
+        selectedDoubaoMode()?.0.keyboardShortcut
+    }
+
+    private var effectiveBridgeShortcut: KeyboardShortcut? {
+        ShortcutSettingsInitialSelection.bridgeShortcut(
+            kind: selectedBridge().kind,
+            doubao: selectedDoubaoMode()?.0,
+            custom: selectedBridgeShortcut
+        )
+    }
+
     private func selectedBridge() -> BridgeShortcutConfiguration {
         switch bridgePopup.indexOfSelectedItem {
         case 1: return .leftControlHold
@@ -340,9 +415,13 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
     }
 
     private func updateSaveButtonState() {
+        guard recordingTarget == nil else {
+            saveButton.isEnabled = false
+            return
+        }
         guard let (doubao, _) = selectedDoubaoMode() else {
             saveButton.isEnabled = false
-            messageLabel.stringValue = "自动读取当前不可用，请改为手动选择。"
+            messageLabel.stringValue = "自动读取当前不可用，请直接录制豆包按键。"
             messageLabel.textColor = .systemRed
             return
         }
@@ -360,7 +439,7 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
 
     @objc private func saveConfiguration() {
         guard let (doubao, manualMode) = selectedDoubaoMode() else {
-            messageLabel.stringValue = "自动读取当前不可用，请改为手动选择。"
+            messageLabel.stringValue = "自动读取当前不可用，请直接录制豆包按键。"
             messageLabel.textColor = .systemRed
             return
         }
@@ -404,18 +483,43 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
     }
 
     private func startRecording(_ target: RecordingTarget) {
-        stopRecording(removeMonitor: true)
+        if recordingSelectionSnapshot != nil {
+            cancelRecordingAndRestore(message: nil)
+        } else {
+            stopRecording(removeMonitor: true)
+        }
+        recordingSelectionSnapshot = RecordingSelectionSnapshot(
+            sourceIndex: sourcePopup.indexOfSelectedItem,
+            doubaoModeIndex: doubaoModePopup.indexOfSelectedItem,
+            bridgeIndex: bridgePopup.indexOfSelectedItem,
+            doubaoShortcut: selectedDoubaoShortcut,
+            bridgeShortcut: selectedBridgeShortcut
+        )
+        switch target {
+        case .doubao:
+            if let current = configurationForSource(sourcePopup.indexOfSelectedItem) {
+                selectedDoubaoShortcut = current.keyboardShortcut
+                doubaoModePopup.selectItem(at: current.mode == .leftControlHold ? 0 : 1)
+            }
+            sourcePopup.selectItem(at: 2)
+        case .bridge:
+            selectedBridgeShortcut = effectiveBridgeShortcut
+            bridgePopup.selectItem(at: 2)
+        }
         recordingTarget = target
         recordingModifierKeyCodes.removeAll()
         recordingUsedMultipleModifiers = false
         recordingFunctionKeyState.reset()
         recorderKeyUpsToSwallow.removeAll()
+        refreshFields()
         let title = target == .doubao ? "请按下豆包当前使用的按键…" : "请按住要作为远控触发键的按键…"
         messageLabel.stringValue = "\(title) 按 Esc 取消；组合键请同时按住修饰键和主键。"
         messageLabel.textColor = .secondaryLabelColor
         let handler = ShortcutRecorderMonitorHandler.make(
             windowIsKey: { [weak self] in self?.window?.isKeyWindow == true },
-            stop: { [weak self] in self?.stopRecording(removeMonitor: true) },
+            stop: { [weak self] in
+                self?.cancelRecordingAndRestore(message: "设置窗口失去焦点，已停止录制并恢复原配置。")
+            },
             consume: { [weak self] event in
                 guard let self else { return event }
                 return self.consumeRecordingEvent(event)
@@ -437,24 +541,44 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
         }
     }
 
+    private func cancelRecordingAndRestore(message: String?) {
+        let snapshot = recordingSelectionSnapshot
+        stopRecording(removeMonitor: true)
+        guard let snapshot else {
+            if let message {
+                messageLabel.stringValue = message
+                messageLabel.textColor = .secondaryLabelColor
+            }
+            return
+        }
+        sourcePopup.selectItem(at: snapshot.sourceIndex)
+        doubaoModePopup.selectItem(at: snapshot.doubaoModeIndex)
+        bridgePopup.selectItem(at: snapshot.bridgeIndex)
+        selectedDoubaoShortcut = snapshot.doubaoShortcut
+        selectedBridgeShortcut = snapshot.bridgeShortcut
+        recordingSelectionSnapshot = nil
+        refreshFields()
+        if let message {
+            messageLabel.stringValue = message
+            messageLabel.textColor = .secondaryLabelColor
+        }
+    }
+
     private func consumeRecordingEvent(_ event: NSEvent) -> NSEvent? {
+        if event.type == .keyUp, recorderKeyUpsToSwallow.remove(event.keyCode) != nil {
+            if recorderKeyUpsToSwallow.isEmpty, recordingTarget == nil { stopRecording(removeMonitor: true) }
+            return nil
+        }
+        if event.type == .flagsChanged, recorderKeyUpsToSwallow.remove(event.keyCode) != nil {
+            if recorderKeyUpsToSwallow.isEmpty, recordingTarget == nil { stopRecording(removeMonitor: true) }
+            return nil
+        }
         guard let target = recordingTarget else {
-            if event.type == .keyUp, recorderKeyUpsToSwallow.remove(event.keyCode) != nil {
-                if recorderKeyUpsToSwallow.isEmpty { stopRecording(removeMonitor: true) }
-                return nil
-            }
-            if event.type == .flagsChanged, recorderKeyUpsToSwallow.remove(event.keyCode) != nil {
-                if recorderKeyUpsToSwallow.isEmpty { stopRecording(removeMonitor: true) }
-                return nil
-            }
             return event
         }
 
         if event.type == .keyDown, event.keyCode == 53 {
-            messageLabel.stringValue = "已取消录制；原有按键保持不变。"
-            messageLabel.textColor = .secondaryLabelColor
-            stopRecording(removeMonitor: true)
-            updateRecorderTitles()
+            cancelRecordingAndRestore(message: "已取消录制；原有来源与按键保持不变。")
             return nil
         }
 
@@ -481,10 +605,8 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
                 case .ignored:
                     return nil
                 case .accepted:
-                    acceptRecordedShortcut(KeyboardShortcut(keyCode: 63), for: target)
-                    recordingTarget = nil
-                    updateRecorderTitles()
-                    stopRecording(removeMonitor: true)
+                    _ = acceptRecordedShortcut(KeyboardShortcut(keyCode: 63), for: target)
+                    if recordingTarget == nil { stopRecording(removeMonitor: true) }
                     return nil
                 }
             }
@@ -497,10 +619,8 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
             if recordingModifierKeyCodes.contains(code) {
                 recordingModifierKeyCodes.remove(code)
                 if recordingModifierKeyCodes.isEmpty, !recordingUsedMultipleModifiers {
-                    acceptRecordedShortcut(KeyboardShortcut(keyCode: code), for: target)
-                    recordingTarget = nil
-                    updateRecorderTitles()
-                    stopRecording(removeMonitor: true)
+                    _ = acceptRecordedShortcut(KeyboardShortcut(keyCode: code), for: target)
+                    if recordingTarget == nil { stopRecording(removeMonitor: true) }
                 }
             } else {
                 recordingModifierKeyCodes.insert(code)
@@ -519,14 +639,14 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
         }
         let mask = Self.shortcutModifierMask(from: modifiers)
         let shortcut = KeyboardShortcut(keyCode: event.keyCode, modifierMask: mask)
-        acceptRecordedShortcut(shortcut, for: target)
         recorderKeyUpsToSwallow.insert(event.keyCode)
-        recordingTarget = nil
+        _ = acceptRecordedShortcut(shortcut, for: target)
         updateRecorderTitles()
         return nil
     }
 
-    private func acceptRecordedShortcut(_ shortcut: KeyboardShortcut, for target: RecordingTarget) {
+    @discardableResult
+    private func acceptRecordedShortcut(_ shortcut: KeyboardShortcut, for target: RecordingTarget) -> Bool {
         let error: String?
         switch target {
         case .doubao: error = shortcut.doubaoValidationError
@@ -539,13 +659,23 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
                 selectedBridgeShortcut = shortcut
                 if bridgePopup.indexOfSelectedItem != 2 { bridgePopup.selectItem(at: 2) }
             }
-            messageLabel.stringValue = "已录制：\(shortcut.displayName)"
-            messageLabel.textColor = .secondaryLabelColor
+            recordingTarget = nil
+            recordingSelectionSnapshot = nil
             refreshFields()
-            return
+            if target == .doubao,
+               let (doubao, _) = selectedDoubaoMode(),
+               let followUp = selectedBridge().validationError(for: doubao) {
+                messageLabel.stringValue = "已录制：\(shortcut.displayName)。\(followUp)"
+                messageLabel.textColor = .systemRed
+            } else {
+                messageLabel.stringValue = "已录制：\(shortcut.displayName)"
+                messageLabel.textColor = .secondaryLabelColor
+            }
+            return true
         }
         messageLabel.stringValue = error
         messageLabel.textColor = .systemRed
+        return false
     }
 
     private static func shortcutModifierMask(from flags: NSEvent.ModifierFlags) -> UInt64 {
@@ -560,22 +690,19 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
     private func updateRecorderTitles() {
         doubaoRecordButton.title = recordingTarget == .doubao
             ? "正在录制豆包按键…"
-            : "录制豆包按键：\(selectedDoubaoShortcut.displayName)"
+            : "录制豆包按键：\(effectiveDoubaoShortcut?.displayName ?? "未设置")"
         bridgeRecordButton.title = recordingTarget == .bridge
             ? "正在录制远控触发键…"
-            : "录制远控触发键：\(selectedBridgeShortcut?.displayName ?? "未设置")"
+            : "录制远控触发键：\(effectiveBridgeShortcut?.displayName ?? "未设置")"
     }
 
     func windowWillClose(_ notification: Notification) {
-        stopRecording(removeMonitor: true)
+        cancelRecordingAndRestore(message: nil)
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        guard recordingTarget != nil else { return }
-        messageLabel.stringValue = "设置窗口失去焦点，已停止录制。"
-        messageLabel.textColor = .secondaryLabelColor
-        stopRecording(removeMonitor: true)
-        updateRecorderTitles()
+        guard recordingSelectionSnapshot != nil else { return }
+        cancelRecordingAndRestore(message: "设置窗口失去焦点，已停止录制并恢复原配置。")
     }
 }
 

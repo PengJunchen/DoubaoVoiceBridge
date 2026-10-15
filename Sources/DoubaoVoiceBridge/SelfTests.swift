@@ -763,6 +763,40 @@ enum SelfTests {
         }
 
         do {
+            let automaticFn = DoubaoShortcutConfiguration(
+                mode: .fnToggle,
+                source: .preferences("fixture"),
+                observedAt: Date(timeIntervalSince1970: 1_800_000_100)
+            )
+            let confirmedF6 = DoubaoShortcutConfiguration(
+                mode: .leftControlHold,
+                source: .confirmed,
+                observedAt: Date(timeIntervalSince1970: 1_800_000_000),
+                shortcut: KeyboardShortcut(keyCode: 97)
+            )
+            let initial = ShortcutSettingsInitialSelection.resolve(
+                automatic: automaticFn,
+                confirmed: confirmedF6,
+                manual: nil
+            )
+            check(initial.sourceIndex, 0, "available automatic settings are the initially selected source")
+            check(initial.configuration?.keyboardShortcut, .fn, "initial effective voice key comes from automatic Fn, not confirmed F6")
+            check(initial.configuration?.mode, .fnToggle, "initial interaction mode comes from the active automatic source")
+            check(
+                ShortcutSettingsInitialSelection.bridgeShortcut(
+                    kind: .followDoubao,
+                    doubao: initial.configuration,
+                    custom: KeyboardShortcut(keyCode: 97)
+                ),
+                .fn,
+                "follow-Doubao recorder displays the active automatic key"
+            )
+            check(
+                ShortcutSettingsInitialSelection.bridgeShortcut(kind: .leftControlHold, doubao: initial.configuration, custom: nil),
+                .leftControl,
+                "left-Control recorder displays its active fixed binding"
+            )
+
             let domain = "DoubaoVoiceBridgeSelfTest.\(UUID().uuidString)"
             let defaults = UserDefaults(suiteName: domain)!
             defaults.removePersistentDomain(forName: domain)
