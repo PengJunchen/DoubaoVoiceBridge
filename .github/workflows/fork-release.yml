@@ -244,24 +244,22 @@ jobs:
           notes_file="$(mktemp)"
           trap 'rm -f "$notes_file"' EXIT
           cat > "$notes_file" <<EOF
-          这是 DoubaoVoiceBridge 独立社区 fork 的便捷预构建包，方便用户直接安装。
+          这是 DoubaoVoiceBridge 的独立迭代 fork，提供便于直接安装的预构建版本。
 
-          - 应用版本：${VERSION}（build ${BUILD_NUMBER}）
-          - 源码提交：${TARGET_SHA}
-          - 架构：arm64 和 x86_64 通用包
-          - 上游项目：https://github.com/yupeng316888-create/DoubaoVoiceBridge（MIT；原 LICENSE 版权声明保留）
-          - 已向上游提交优化：[PR #3](https://github.com/yupeng316888-create/DoubaoVoiceBridge/pull/3)
-          - fork 改进：独立按键录制、准确长按交互、简化设置界面与剪贴板保护
-          - 签名：ad-hoc；没有 Apple Developer ID 签名或公证
+          - 暖灰蓝图标与设置、听写框主题，默认窗口更紧凑；豆包键和远控键可分别录制，提示随模式更新。
+          - 独立远控键按住说话、松开结束并粘贴；跟随模式沿用豆包按键方式。
+          - 投递前验证 UU 原窗口，并保护剪贴板内容与恢复状态。
 
-          下载 ZIP 并用随附的 SHA-256 文件校验，解压后将应用移入“应用程序”。macOS 可能要求确认这个未公证的构建后才允许打开。
+          提供 macOS 13+ arm64/x86_64 通用包。安装并授予所需权限后，在 UU 按录制的按键操作；请自行发送消息。
+          上游：[DoubaoVoiceBridge](https://github.com/yupeng316888-create/DoubaoVoiceBridge)（MIT，保留原 LICENSE 版权声明）；优化已提交至[上游 PR #3](https://github.com/yupeng316888-create/DoubaoVoiceBridge/pull/3)。
+          版本：v${VERSION}（build ${BUILD_NUMBER}）；源码提交：${TARGET_SHA}。ad-hoc 签名，未经 Apple 公证。
           EOF
 
           gh release create "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --target "$TARGET_SHA" \
-            --title "DoubaoVoiceBridge v${VERSION} (build ${BUILD_NUMBER})" \
+            --title "远控听写 v${VERSION}" \
             --notes-file "$notes_file" \
             "release-files/$ZIP_NAME" \
             "release-files/$CHECKSUM_NAME"

@@ -170,7 +170,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func configureStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = item.button {
-            button.image = NSImage(systemSymbolName: "mic.and.signal.meter", accessibilityDescription: "远控听写")
+            let image = NSImage(systemSymbolName: "mic.and.signal.meter", accessibilityDescription: "远控听写")
+            image?.isTemplate = true
+            button.image = image
             button.toolTip = "远控听写 · 点击查看设置与状态"
             button.setAccessibilityLabel("远控听写：设置与状态")
         }

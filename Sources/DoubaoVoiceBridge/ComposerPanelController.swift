@@ -147,7 +147,8 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.97)
+        panel.backgroundColor = BridgeTheme.surface
+        BridgeTheme.configure(panel)
         super.init(window: panel)
         buildInterface(in: panel)
     }
@@ -175,7 +176,7 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
         lastTextChangeAt = Date()
         targetLabel.stringValue = targetDescription
         statusLabel.stringValue = startsDictation ? "正在启动豆包语音输入法…\(shortcutInstruction)" : shortcutInstruction
-        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.textColor = BridgeTheme.muted
 
         guard let window else { return }
         position(window)
@@ -192,7 +193,7 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
     func waitForFinalTranscript() {
         isWaitingForFinalTranscript = true
         statusLabel.stringValue = "正在等待豆包语音输入法完成识别…"
-        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.textColor = BridgeTheme.muted
         settleStartedAt = Date()
         lastTextChangeAt = Date()
         scheduleSettleCheck(for: sessionID)
@@ -203,7 +204,7 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
         acceptsTranscriptUpdates = false
         cancelSettleTimer()
         statusLabel.stringValue = "正在将文字粘贴到 UU 远控…"
-        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.textColor = BridgeTheme.muted
         textView.isEditable = false
         window?.makeFirstResponder(nil)
     }
@@ -288,14 +289,15 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
 
     private func buildInterface(in panel: NSPanel) {
         guard let content = panel.contentView else { return }
+        BridgeTheme.applySurface(to: content, color: BridgeTheme.surface)
 
         let icon = NSImageView()
         icon.image = NSImage(systemSymbolName: "waveform.circle.fill", accessibilityDescription: "语音输入")
-        icon.contentTintColor = .systemBlue
+        icon.contentTintColor = BridgeTheme.accent
         icon.translatesAutoresizingMaskIntoConstraints = false
 
         targetLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        targetLabel.textColor = .labelColor
+        targetLabel.textColor = BridgeTheme.text
         targetLabel.lineBreakMode = .byTruncatingMiddle
         targetLabel.translatesAutoresizingMaskIntoConstraints = false
 
@@ -304,8 +306,9 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
 
         textView.delegate = self
         textView.font = .systemFont(ofSize: 18)
-        textView.textColor = .labelColor
-        textView.backgroundColor = .textBackgroundColor
+        textView.textColor = BridgeTheme.text
+        textView.insertionPointColor = BridgeTheme.accent
+        textView.backgroundColor = BridgeTheme.surface
         textView.isRichText = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
@@ -316,7 +319,9 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
 
         ComposerTextLayout.attach(textView, to: scrollView)
         scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
         scrollView.drawsBackground = true
+        scrollView.backgroundColor = BridgeTheme.canvas
         scrollView.borderType = .bezelBorder
         scrollView.translatesAutoresizingMaskIntoConstraints = false
 
