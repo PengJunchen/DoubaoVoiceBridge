@@ -1122,7 +1122,15 @@ enum SelfTests {
                 [.init(shortcut: KeyboardShortcut(keyCode: 61), down: true)],
                 "the followed Right Option click synthesizes the configured Doubao key only after composer readiness"
             )
-            RunLoop.main.run(until: Date().addingTimeInterval(0.08))
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(5)) {}
+            check(
+                waitForMainRunLoopCondition(timeout: 0.5) {
+                    rightOptionFollow.postedShortcuts.count == 2 &&
+                        rightOptionFollow.postedShortcuts.last?.down == false
+                },
+                true,
+                "the followed toggle release completes despite an earlier main-run-loop wake"
+            )
             check(
                 rightOptionFollow.postedShortcuts,
                 [
@@ -1158,7 +1166,13 @@ enum SelfTests {
             check(chordFollow.beginCount, 1, "the followed chord enters the production start route once")
             chordFollow.composerReady = true
             chordFollow.monitor.postSyntheticDownIfNeeded()
-            RunLoop.main.run(until: Date().addingTimeInterval(0.08))
+            check(
+                waitForMainRunLoopCondition(timeout: 0.5) {
+                    chordFollow.postedShortcuts.count == 2 && chordFollow.postedShortcuts.last?.down == false
+                },
+                true,
+                "the followed chord release completes before the bounded test deadline"
+            )
             check(
                 chordFollow.postedShortcuts,
                 [
@@ -1481,6 +1495,23 @@ enum SelfTests {
             ),
             bridge: .followDoubao
         )
+    }
+
+    private static func waitForMainRunLoopCondition(
+        timeout: TimeInterval,
+        _ condition: () -> Bool
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else { return condition() }
+            let nextPoll = Date().addingTimeInterval(min(remaining, 0.05))
+            // RunLoop.run(until:) may return after handling another source.
+            // Keep pumping until the production completion condition is true
+            // or this test reaches its explicit upper bound.
+            _ = RunLoop.main.run(mode: .default, before: nextPoll)
+        }
+        return true
     }
 }
 
