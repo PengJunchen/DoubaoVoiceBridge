@@ -54,7 +54,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         UserDefaults.standard.register(defaults: [
             "pasteDelay": UURemoteDelivery.defaultPasteDelay,
-            "restoreClipboard": true,
+            // UU has no delivery acknowledgement. Keep the transcript until
+            // the user chooses to replace it, unless restoration is opted in.
+            "restoreClipboard": false,
             "autoPasteUU": true,
             "controlHoldThreshold": 0.18
         ])
@@ -198,7 +200,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func rebuildMenu() {
         let menu = NSMenu()
-        let status = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
+        let displayStatus: String
+        if !statusIsError, statusText.hasPrefix("就绪"), let profile = shortcutProfile {
+            displayStatus = "就绪 · " + ShortcutUsageCopy.make(doubao: profile.doubao, bridge: profile.bridge).title
+        } else { displayStatus = statusText }
+        let status = NSMenuItem(title: displayStatus, action: nil, keyEquivalent: "")
         status.isEnabled = false
         if statusIsError {
             status.attributedTitle = NSAttributedString(
@@ -208,44 +214,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         menu.addItem(status)
 
-        let instructionLines = shortcutProfile?.statusMenuLines ?? [
-            "远控触发键：未设置",
-            "豆包语音键：未设置"
-        ]
-        for line in instructionLines {
-            let instruction = NSMenuItem(title: line, action: nil, keyEquivalent: "")
-            instruction.isEnabled = false
-            menu.addItem(instruction)
-        }
-        let source = NSMenuItem(
-            title: shortcutConfiguration?.sourceAndTime ?? "来源：未检测到可用设置",
-            action: nil,
-            keyEquivalent: ""
-        )
-        source.isEnabled = false
-        menu.addItem(source)
         menu.addItem(.separator())
-
+        let setup = NSMenuItem(title: "打开设置…", action: #selector(openShortcutSettingsFromMenu), keyEquivalent: "")
+        setup.target = self
+        menu.addItem(setup)
+        let more = NSMenuItem(title: "更多", action: nil, keyEquivalent: "")
+        let details = NSMenu()
+        for line in shortcutProfile?.statusMenuLines ?? ["尚未配置语音按键"] {
+            let item = NSMenuItem(title: line, action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            details.addItem(item)
+        }
+        details.addItem(.separator())
+        for (title, action) in [
+            ("读取豆包快捷键", #selector(readDoubaoShortcut)),
+            ("打开豆包设置…", #selector(openDoubaoSettings)),
+            ("检查权限…", #selector(openPermissions))
+        ] {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = self
+            details.addItem(item)
+        }
         let manual = NSMenuItem(title: "手动打开听写框", action: #selector(openComposerManually), keyEquivalent: "")
         manual.target = self
         manual.isEnabled = shortcutProfile?.supportsManualComposerEntry == true
-        menu.addItem(manual)
-
-        let setup = NSMenuItem(title: "设置豆包与远控按键…", action: #selector(openShortcutSettingsFromMenu), keyEquivalent: "")
-        setup.target = self
-        menu.addItem(setup)
-
-        let refresh = NSMenuItem(title: "读取豆包快捷键", action: #selector(readDoubaoShortcut), keyEquivalent: "")
-        refresh.target = self
-        menu.addItem(refresh)
-
-        let openSettings = NSMenuItem(title: "打开豆包设置…", action: #selector(openDoubaoSettings), keyEquivalent: "")
-        openSettings.target = self
-        menu.addItem(openSettings)
-
-        let permissions = NSMenuItem(title: "检查 / 开启所需权限…", action: #selector(openPermissions), keyEquivalent: "")
-        permissions.target = self
-        menu.addItem(permissions)
+        details.addItem(manual)
+        more.submenu = details
+        menu.addItem(more)
 
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "退出远控听写", action: #selector(quitApplication), keyEquivalent: "q")
@@ -347,8 +342,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             return .success(())
         }
+        controller.onOpenPasteTest = { [weak self] in self?.openPasteTest() }
         settingsWindowController = controller
         controller.present()
+    }
+
+    private func openPasteTest() {
+        guard coordinator.canBegin else {
+            setStatus("请先完成或取消当前听写，再测试粘贴", isError: true)
+            return
+        }
+        guard AXIsProcessTrusted(),
+              let app = NSWorkspace.shared.runningApplications.first(where: {
+                  $0.bundleIdentifier == Self.uuRemoteBundleIdentifier && !$0.isTerminated
+              }) else {
+            setStatus("请先打开 UU 并确认辅助功能权限", isError: true)
+            return
+        }
+        let target = UURemoteTarget(application: app)
+        guard target.captureFocusedWindow() else {
+            setStatus("无法确认 UU 目标窗口；请先点选远端输入框", isError: true)
+            return
+        }
+        settingsWindowController?.window?.orderOut(nil)
+        coordinator.beginPasteTest(target: target)
     }
 
     private func openTextEditForLocalTest() {

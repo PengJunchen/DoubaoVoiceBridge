@@ -159,7 +159,8 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
     func begin(
         targetDescription: String,
         shortcutInstruction: String,
-        observesControlRelease: Bool
+        observesControlRelease: Bool,
+        startsDictation: Bool = true
     ) {
         sessionID = UUID()
         cancelSettleTimer()
@@ -173,7 +174,7 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
         textView.isEditable = true
         lastTextChangeAt = Date()
         targetLabel.stringValue = targetDescription
-        statusLabel.stringValue = "正在启动豆包语音输入法…\(shortcutInstruction)"
+        statusLabel.stringValue = startsDictation ? "正在启动豆包语音输入法…\(shortcutInstruction)" : shortcutInstruction
         statusLabel.textColor = .secondaryLabelColor
 
         guard let window else { return }
@@ -201,7 +202,7 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
         isWaitingForFinalTranscript = false
         acceptsTranscriptUpdates = false
         cancelSettleTimer()
-        statusLabel.stringValue = "识别完成，正在同步到 UU 远控…"
+        statusLabel.stringValue = "正在将文字粘贴到 UU 远控…"
         statusLabel.textColor = .secondaryLabelColor
         textView.isEditable = false
         window?.makeFirstResponder(nil)
@@ -276,11 +277,11 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
             if isWaitingForFinalTranscript {
                 statusLabel.stringValue = marked
                     ? "豆包语音输入法正在完成识别…"
-                    : "已收到识别文字，正在准备自动发送…"
+                    : "已收到文字，正在准备粘贴…"
             } else {
                 statusLabel.stringValue = marked
                     ? "豆包语音输入法正在识别…\(shortcutInstruction)"
-                    : "已收到识别文字，\(shortcutInstruction)"
+                    : "已收到文字，\(shortcutInstruction)"
             }
         }
     }

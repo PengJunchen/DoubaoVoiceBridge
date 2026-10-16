@@ -4,12 +4,39 @@ import AppKit
 
 enum SelfTests {
     static func run() -> Bool {
-        var failures: [String] = []
+        var failures = DeliverySelfTests.run()
 
         func check<T: Equatable>(_ actual: T, _ expected: T, _ label: String) {
             if actual != expected {
                 failures.append("\(label): expected \(expected), got \(actual)")
             }
+        }
+
+        do {
+            let rightOption = KeyboardShortcut(keyCode: 61)
+            let toggle = DoubaoShortcutConfiguration.manual(.fnToggle, shortcut: rightOption)
+            let independent = BridgeShortcutConfiguration(kind: .customHold, shortcut: rightOption)
+            let holdCopy = ShortcutUsageCopy.make(doubao: toggle, bridge: independent)
+            check(holdCopy.title, "在 UU 中按住 右 ⌥ 说话", "independent remote Option requires holding even when Doubao is click-to-start")
+            check(holdCopy.detail.hasPrefix("松开"), true, "hold instruction describes release")
+            let recordedCases: [(KeyboardShortcut, String)] = [
+                (KeyboardShortcut(keyCode: 58), "左 ⌥"),
+                (KeyboardShortcut(keyCode: 97), "F6"),
+                (KeyboardShortcut(keyCode: 2, modifierMask: CGEventFlags.maskControl.rawValue | CGEventFlags.maskShift.rawValue), "⌃⇧D")
+            ]
+            for (shortcut, name) in recordedCases {
+                let custom = BridgeShortcutConfiguration(kind: .customHold, shortcut: shortcut)
+                let copy = ShortcutUsageCopy.make(doubao: toggle, bridge: custom)
+                check(copy.title, "在 UU 中按住 \(name) 说话", "usage follows the user's recorded remote key")
+                check(copy.detail, holdCopy.detail, "changing a recorded key preserves the remote hold interaction")
+            }
+            let recordedDoubao = DoubaoShortcutConfiguration.manual(.fnToggle, shortcut: KeyboardShortcut(keyCode: 97))
+            check(ShortcutUsageCopy.make(doubao: recordedDoubao, bridge: .followDoubao).title,
+                  "在 UU 中点按 F6 开始", "follow usage updates when the recorded Doubao key changes")
+            let followCopy = ShortcutUsageCopy.make(doubao: toggle, bridge: .followDoubao)
+            check(followCopy.title, "在 UU 中点按 右 ⌥ 开始", "explicit follow mode retains click-to-start")
+            check(followCopy.detail.hasPrefix("按任意键"), true, "toggle instruction describes its actual stop action")
+            check(ShortcutUsageCopy.make(doubao: nil, bridge: independent).title, "先设置语音按键", "missing configuration never advertises a usable shortcut")
         }
 
         do {

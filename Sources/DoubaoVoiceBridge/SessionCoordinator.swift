@@ -73,9 +73,9 @@ final class SessionCoordinator {
         sessionShortcutProfile = profile
         localFnDictationActive = false
         state = .listening
-        let instruction = "远控触发：\(profile.bridgeInstruction)；确认文字后自动发送"
+        let instruction = "\(profile.bridgeInstruction)；识别完成后自动粘贴"
         panel.begin(
-            targetDescription: "发送到 UU 远控",
+            targetDescription: "粘贴到 UU 远控输入框",
             shortcutInstruction: instruction,
             observesControlRelease: Self.shouldObserveControlRelease(manualEntry: manualEntry, profile: profile)
         )
@@ -88,6 +88,21 @@ final class SessionCoordinator {
         state = .finalizing
         panel.waitForFinalTranscript()
         onStatusChange?("正在完成识别…", false)
+    }
+
+    func beginPasteTest(target: UURemoteTarget) {
+        guard canBegin else { return }
+        self.target = target
+        sessionShortcutProfile = nil
+        localFnDictationActive = false
+        state = .listening
+        panel.begin(
+            targetDescription: "测试粘贴到 UU 远控的当前输入框",
+            shortcutInstruction: "输入测试文字后按回车仅粘贴 · 不启动录音 · Esc 取消",
+            observesControlRelease: false,
+            startsDictation: false
+        )
+        onStatusChange?("输入测试文字，按回车粘贴到 UU；不会发送远端消息", false)
     }
 
     func cancel() {

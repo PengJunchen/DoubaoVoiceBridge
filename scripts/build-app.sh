@@ -14,6 +14,7 @@ stage_app="$stage_root/远控听写·自动适配.app"
 mkdir -p "$stage_app/Contents/MacOS" "$stage_app/Contents/Resources"
 cp "$project_root/Resources/Info.plist" "$stage_app/Contents/Info.plist"
 cp "$project_root/Resources/AppIcon.icns" "$stage_app/Contents/Resources/AppIcon.icns"
+cp "$project_root/LICENSE" "$stage_app/Contents/Resources/LICENSE"
 
 lipo -create \
     "$project_root/.build/x86_64-apple-macosx/release/DoubaoVoiceBridge" \

@@ -103,6 +103,7 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
     var onSave: ((DoubaoShortcutConfiguration, DoubaoShortcutMode?, KeyboardShortcut?, BridgeShortcutConfiguration) -> Result<Void, ShortcutSaveError>)?
     var onOpenPermissions: (() -> Void)?
     var onOpenLocalTest: (() -> Void)?
+    var onOpenPasteTest: (() -> Void)?
 
     private let automaticConfiguration: DoubaoShortcutConfiguration?
     private let confirmedConfiguration: DoubaoShortcutConfiguration?
@@ -116,6 +117,11 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
     private let permissionsSummary = NSTextField(wrappingLabelWithString: "")
     private let messageLabel = NSTextField(wrappingLabelWithString: "")
     private let saveButton = NSButton(title: "保存并启用", target: nil, action: nil)
+    private let pasteDelayLabel = NSTextField(labelWithString: "")
+    private let usageHeading = NSTextField(wrappingLabelWithString: "")
+    private let usageHint = NSTextField(wrappingLabelWithString: "")
+    private let advancedStack = NSStackView()
+    private let advancedButton = NSButton(title: "更改按键与高级设置…", target: nil, action: nil)
     private let initialSelection: ShortcutSettingsInitialSelection
     private var initialBridgeKind: BridgeShortcutKind
     private var selectedDoubaoShortcut: KeyboardShortcut
@@ -160,7 +166,7 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
         self.selectedBridgeShortcut = bridgeConfiguration?.shortcut
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 760),
+            contentRect: NSRect(x: 0, y: 0, width: 620, height: 360),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -192,131 +198,145 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
     private func buildInterface(in window: NSWindow) {
         guard let contentView = window.contentView else { return }
 
-        sourcePopup.addItem(withTitle: automaticConfiguration == nil ? "自动读取（暂不可用）" : "自动读取豆包设置")
-        sourcePopup.addItem(withTitle: confirmedConfiguration == nil ? "上次确认（暂不可用）" : "使用上次确认的设置")
-        sourcePopup.addItem(withTitle: "使用录制的按键")
+        sourcePopup.addItems(withTitles: ["自动读取豆包设置", "使用上次确认的设置", "使用录制的按键"])
         sourcePopup.target = self
         sourcePopup.action = #selector(selectionChanged)
-        let initialSourceIndex = initialSelection.sourceIndex
-        sourcePopup.selectItem(at: initialSourceIndex)
+        sourcePopup.selectItem(at: initialSelection.sourceIndex)
         sourcePopup.item(at: 0)?.isEnabled = automaticConfiguration?.mode.isSupported == true
         sourcePopup.item(at: 1)?.isEnabled = confirmedConfiguration?.mode.isSupported == true
-        if let confirmedConfiguration {
-            let confirmedKey = confirmedConfiguration.keyboardShortcut.displayName
-            sourcePopup.item(at: 1)?.title = "上次确认：\(confirmedKey)"
-        }
-
-        doubaoModePopup.addItem(withTitle: "长按触发，松开豆包按键结束")
-        doubaoModePopup.addItem(withTitle: "单击启动，任意键结束")
+        doubaoModePopup.addItems(withTitles: ["长按说话，松开结束", "单击启动，任意键结束"])
         doubaoModePopup.target = self
         doubaoModePopup.action = #selector(selectionChanged)
-        let initialMode = initialSelection.configuration?.mode ?? .fnToggle
-        doubaoModePopup.selectItem(at: initialMode == .leftControlHold ? 0 : 1)
+        doubaoModePopup.selectItem(at: initialSelection.configuration?.mode == .leftControlHold ? 0 : 1)
         doubaoRecordButton.target = self
         doubaoRecordButton.action = #selector(recordDoubaoShortcut)
         bridgeRecordButton.target = self
         bridgeRecordButton.action = #selector(recordBridgeShortcut)
-
-        bridgePopup.addItem(withTitle: BridgeShortcutKind.followDoubao.title)
-        bridgePopup.addItem(withTitle: BridgeShortcutKind.leftControlHold.title)
-        bridgePopup.addItem(withTitle: BridgeShortcutKind.customHold.title)
+        bridgePopup.addItems(withTitles: [BridgeShortcutKind.followDoubao.title, BridgeShortcutKind.leftControlHold.title, BridgeShortcutKind.customHold.title])
         bridgePopup.target = self
         bridgePopup.action = #selector(selectionChanged)
-        bridgePopup.selectItem(at: initialBridgeKind == .leftControlHold ? 1 : (initialBridgeKind == .customHold ? 2 : 0))
-
-        automaticSummary.maximumNumberOfLines = 4
-        automaticSummary.textColor = .secondaryLabelColor
-        bridgeSummary.maximumNumberOfLines = 4
-        bridgeSummary.textColor = .secondaryLabelColor
-        permissionsSummary.maximumNumberOfLines = 2
-        permissionsSummary.textColor = .secondaryLabelColor
-        messageLabel.maximumNumberOfLines = 3
-        messageLabel.textColor = .secondaryLabelColor
+        bridgePopup.selectItem(at: initialBridgeKind == .leftControlHold ? 1 : initialBridgeKind == .customHold ? 2 : 0)
+        saveButton.title = "保存并启用"
         saveButton.target = self
         saveButton.action = #selector(saveConfiguration)
         saveButton.keyEquivalent = "\r"
+        advancedButton.target = self
+        advancedButton.action = #selector(toggleAdvanced)
 
-        let title = NSTextField(labelWithString: "设置豆包语音键与远控触发键")
-        title.font = .boldSystemFont(ofSize: 20)
+        let title = NSTextField(labelWithString: "远控听写")
+        title.font = .systemFont(ofSize: 15, weight: .semibold)
         let heading = NSStackView()
         heading.orientation = .horizontal
-        heading.alignment = .centerY
         heading.spacing = 12
-        if let icon = NSImage(named: NSImage.Name("AppIcon")) {
-            let iconView = NSImageView(image: icon)
-            iconView.imageScaling = .scaleProportionallyUpOrDown
-            iconView.widthAnchor.constraint(equalToConstant: 44).isActive = true
-            iconView.heightAnchor.constraint(equalToConstant: 44).isActive = true
-            heading.addArrangedSubview(iconView)
+        if let image = NSImage(named: NSImage.Name("AppIcon")) {
+            let icon = NSImageView(image: image)
+            icon.widthAnchor.constraint(equalToConstant: 36).isActive = true
+            icon.heightAnchor.constraint(equalToConstant: 36).isActive = true
+            heading.addArrangedSubview(icon)
         }
         heading.addArrangedSubview(title)
-        let intro = NSTextField(wrappingLabelWithString: "远控触发键只在 UU 前台打开本工具听写框；豆包语音键在听写框就绪后触发豆包。两侧可分别录制；只有远控选择“跟随豆包按键”时才共用按键和交互方式。录制只保存到本工具，不修改豆包设置。")
-        intro.textColor = .secondaryLabelColor
-        intro.maximumNumberOfLines = 4
+        usageHeading.font = .systemFont(ofSize: 22, weight: .semibold)
+        usageHint.font = .systemFont(ofSize: 13)
+        let boundary = NSTextField(wrappingLabelWithString: "先点选远端输入框。粘贴完成后，自行发送消息。")
+        boundary.font = .systemFont(ofSize: 12)
+        boundary.textColor = .secondaryLabelColor
+        permissionsSummary.font = .systemFont(ofSize: 12)
+        permissionsSummary.textColor = .secondaryLabelColor
+        let permissionsButton = NSButton(title: "检查权限…", target: self, action: #selector(openPermissions))
+        let permissionRow = NSStackView(views: [permissionsSummary, permissionsButton])
+        permissionRow.spacing = 12
 
-        let sourceLabel = makeSectionLabel("豆包语音键")
-        let modeLabel = makeSectionLabel("豆包语音交互方式")
-        let bridgeLabel = makeSectionLabel("远控触发键")
-        let permissionsLabel = makeSectionLabel("所需权限")
-        let permissionsButton = NSButton(title: "打开隐私与安全性设置…", target: self, action: #selector(openPermissions))
-        let localTestButton = NSButton(title: "打开 TextEdit 进行本机识别测试…", target: self, action: #selector(openLocalTest))
-
-        let stack = NSStackView(views: [
-            heading,
-            intro,
-            bridgeLabel,
-            bridgePopup,
-            bridgeRecordButton,
-            bridgeSummary,
-            sourceLabel,
-            sourcePopup,
-            doubaoRecordButton,
-            automaticSummary,
-            modeLabel,
-            doubaoModePopup,
-            localTestButton,
-            permissionsLabel,
-            permissionsSummary,
-            permissionsButton,
-            messageLabel,
-            saveButton
-        ])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.distribution = .gravityAreas
-        stack.spacing = 10
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        let scrollView = NSScrollView(frame: .zero)
-        scrollView.hasVerticalScroller = true
-        scrollView.drawsBackground = false
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(scrollView)
-        let documentView = FlippedDocumentView(frame: .zero)
-        documentView.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.documentView = documentView
-        documentView.addSubview(stack)
-
+        let localTestButton = NSButton(title: "测试本机语音识别…", target: self, action: #selector(openLocalTest))
+        let pasteTestButton = NSButton(title: "测试远端文字粘贴…", target: self, action: #selector(openPasteTest))
+        let tests = NSStackView(views: [localTestButton, pasteTestButton])
+        tests.spacing = 12
+        let testNote = NSTextField(wrappingLabelWithString: "粘贴测试使用手动文字，不启动录音。按回车只粘贴到远端，Esc 取消。")
+        let restore = NSButton(checkboxWithTitle: "粘贴后恢复原剪贴板（同步慢时建议关闭）", target: self, action: #selector(changeClipboardRestore(_:)))
+        restore.state = UserDefaults.standard.bool(forKey: "restoreClipboard") ? .on : .off
+        let delay = NSSlider(value: UserDefaults.standard.double(forKey: "pasteDelay"),
+                             minValue: UURemoteDelivery.minimumPasteDelay, maxValue: UURemoteDelivery.maximumPasteDelay,
+                             target: self, action: #selector(changePasteDelay(_:)))
+        delay.setAccessibilityLabel("等待 UU 剪贴板同步的秒数")
+        delay.widthAnchor.constraint(equalToConstant: 180).isActive = true
+        updatePasteDelayLabel(delay.doubleValue)
+        let delayRow = NSStackView(views: [NSTextField(labelWithString: "粘贴前等待"), delay, pasteDelayLabel])
+        delayRow.spacing = 10
+        automaticSummary.font = .systemFont(ofSize: 12)
+        automaticSummary.textColor = .secondaryLabelColor
+        bridgeSummary.font = .systemFont(ofSize: 12)
+        bridgeSummary.textColor = .secondaryLabelColor
+        testNote.font = .systemFont(ofSize: 12)
+        testNote.textColor = .secondaryLabelColor
+        messageLabel.font = .systemFont(ofSize: 12)
+        messageLabel.textColor = .secondaryLabelColor
+        advancedStack.orientation = .vertical
+        advancedStack.alignment = .leading
+        advancedStack.spacing = 10
+        for view in [makeSectionLabel("远控触发键"), bridgePopup, bridgeRecordButton, bridgeSummary,
+                     makeSectionLabel("豆包语音键"), sourcePopup, doubaoRecordButton, doubaoModePopup, automaticSummary,
+                     makeSectionLabel("粘贴与测试"), restore, delayRow, tests, testNote, messageLabel] {
+            advancedStack.addArrangedSubview(view)
+        }
+        advancedStack.isHidden = true
         for control in [sourcePopup, doubaoModePopup, bridgePopup] {
             control.widthAnchor.constraint(equalToConstant: 540).isActive = true
         }
-        for field in [intro, automaticSummary, bridgeSummary, permissionsSummary, messageLabel] {
+        for field in [usageHeading, usageHint, boundary, automaticSummary, bridgeSummary, testNote, messageLabel] {
             field.widthAnchor.constraint(equalToConstant: 540).isActive = true
         }
+        let stack = NSStackView(views: [heading, usageHeading, usageHint, boundary, permissionRow, advancedButton, advancedStack])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 14
+        stack.detachesHiddenViews = true
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        let document = FlippedDocumentView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = document
+        document.addSubview(stack)
+        contentView.addSubview(scroll)
+
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+        let footerLabel = NSTextField(labelWithString: "版本 \(version) · 关闭窗口后在菜单栏运行")
+        footerLabel.font = .systemFont(ofSize: 11)
+        footerLabel.textColor = .secondaryLabelColor
+        footerLabel.translatesAutoresizingMaskIntoConstraints = false
+        saveButton.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(footerLabel)
+        contentView.addSubview(saveButton)
         NSLayoutConstraint.activate([
-            scrollView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            scrollView.topAnchor.constraint(equalTo: contentView.topAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
-            documentView.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
-            documentView.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
-            documentView.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
-            documentView.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
-            documentView.heightAnchor.constraint(greaterThanOrEqualTo: scrollView.contentView.heightAnchor),
-            stack.leadingAnchor.constraint(equalTo: documentView.leadingAnchor, constant: 24),
-            stack.trailingAnchor.constraint(equalTo: documentView.trailingAnchor, constant: -24),
-            stack.topAnchor.constraint(equalTo: documentView.topAnchor, constant: 22),
-            stack.bottomAnchor.constraint(equalTo: documentView.bottomAnchor, constant: -20)
+            scroll.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: contentView.topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: saveButton.topAnchor, constant: -18),
+            document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+            document.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            document.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            stack.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 24),
+            stack.topAnchor.constraint(equalTo: document.topAnchor, constant: 22),
+            stack.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -12),
+            document.heightAnchor.constraint(greaterThanOrEqualTo: scroll.contentView.heightAnchor),
+            saveButton.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -24),
+            saveButton.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -18),
+            footerLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 24),
+            footerLabel.centerYAnchor.constraint(equalTo: saveButton.centerYAnchor)
         ])
+    }
+
+    @objc private func toggleAdvanced() {
+        let expanding = advancedStack.isHidden
+        advancedStack.isHidden = !expanding
+        advancedButton.title = expanding ? "收起高级设置" : "更改按键与高级设置…"
+        guard let window else { return }
+        var frame = window.frame
+        let newHeight: CGFloat = expanding ? 760 : 388
+        frame.origin.y += frame.height - newHeight
+        frame.size.height = newHeight
+        window.setFrame(frame, display: true)
     }
 
     private func makeSectionLabel(_ text: String) -> NSTextField {
@@ -367,8 +387,11 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
 
         let accessibilityGranted = AXIsProcessTrusted()
         let inputGranted = CGPreflightListenEventAccess()
-        permissionsSummary.stringValue = "辅助功能：\(accessibilityGranted ? "已授权" : "未授权")；输入监控：\(inputGranted ? "已授权" : "未授权")。未授权时不会启用快捷键监听。"
-        messageLabel.stringValue = "本机测试入口会打开 TextEdit；请在其中新建空白文稿，用豆包自己的按键验证真实识别。远程粘贴仍需另行在 UU 远控中验证。"
+        permissionsSummary.stringValue = "辅助功能\(accessibilityGranted ? "已授权" : "未授权") · 输入监控\(inputGranted ? "已授权" : "未授权")"
+        let usage = ShortcutUsageCopy.make(doubao: selectedDoubaoMode()?.0, bridge: selectedBridge())
+        usageHeading.stringValue = usage.title
+        usageHint.stringValue = usage.detail
+        messageLabel.stringValue = ""
         updateSaveButtonState()
         updateRecorderTitles()
     }
@@ -464,7 +487,7 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
             messageLabel.stringValue = validationError
             messageLabel.textColor = .systemRed
         } else {
-            messageLabel.stringValue = "本机测试入口会打开 TextEdit；请在其中用豆包自己的按键验证识别。远程粘贴仍需在 UU 远控中验证。"
+            messageLabel.stringValue = ""
             messageLabel.textColor = .secondaryLabelColor
         }
     }
@@ -504,6 +527,21 @@ final class ShortcutSettingsWindowController: NSWindowController, NSWindowDelega
 
     @objc private func openLocalTest() {
         onOpenLocalTest?()
+    }
+
+    @objc private func openPasteTest() { onOpenPasteTest?() }
+
+    @objc private func changeClipboardRestore(_ sender: NSButton) {
+        UserDefaults.standard.set(sender.state == .on, forKey: "restoreClipboard")
+    }
+
+    @objc private func changePasteDelay(_ sender: NSSlider) {
+        UserDefaults.standard.set(sender.doubleValue, forKey: "pasteDelay")
+        updatePasteDelayLabel(sender.doubleValue)
+    }
+
+    private func updatePasteDelayLabel(_ value: Double) {
+        pasteDelayLabel.stringValue = String(format: "%.2f 秒", value)
     }
 
     @objc private func recordDoubaoShortcut() {
