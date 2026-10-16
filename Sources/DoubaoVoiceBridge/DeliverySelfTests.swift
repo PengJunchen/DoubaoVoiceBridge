@@ -2,14 +2,18 @@ import AppKit
 
 enum DeliverySelfTests {
     static func run() -> [String] {
-        [false, true].flatMap { republish in runScenario(republish: republish) }
-            + runScenario(republish: true, replacement: "a later user copy")
-            + runScenario(republish: false, windowMatches: false)
-            + runScenario(republish: false, appTerminated: true)
-            + runActivationScenario(becomesActive: true)
-            + runActivationScenario(becomesActive: false)
-            + runActivationScenario(becomesActive: true, delayedWindow: true)
-            + runScenario(republish: false, copyAfterPaste: true)
+        var failures: [String] = []
+        for republish in [false, true] {
+            failures.append(contentsOf: runScenario(republish: republish))
+        }
+        failures.append(contentsOf: runScenario(republish: true, replacement: "a later user copy"))
+        failures.append(contentsOf: runScenario(republish: false, windowMatches: false))
+        failures.append(contentsOf: runScenario(republish: false, appTerminated: true))
+        failures.append(contentsOf: runActivationScenario(becomesActive: true))
+        failures.append(contentsOf: runActivationScenario(becomesActive: false))
+        failures.append(contentsOf: runActivationScenario(becomesActive: true, delayedWindow: true))
+        failures.append(contentsOf: runScenario(republish: false, copyAfterPaste: true))
+        return failures
     }
 
     private static func runScenario(
