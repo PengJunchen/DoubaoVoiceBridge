@@ -30,8 +30,6 @@ jobs:
       build_number: ${{ steps.meta.outputs.build_number }}
       release_tag: ${{ steps.meta.outputs.release_tag }}
       target_sha: ${{ steps.meta.outputs.target_sha }}
-      zip_name: ${{ steps.package.outputs.zip_name }}
-      checksum_name: ${{ steps.package.outputs.checksum_name }}
     steps:
       - name: Guard repository
         shell: bash
@@ -50,6 +48,13 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Preserve release packager before selecting tagged source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp "$GITHUB_WORKSPACE/scripts/package-release.sh" "$RUNNER_TEMP/package-release.sh"
+          chmod 755 "$RUNNER_TEMP/package-release.sh"
 
       - name: Validate source and version
         id: meta
@@ -152,33 +157,27 @@ jobs:
           esac
           echo "Verified universal architectures: $architectures"
 
-      - name: Package app and checksum
-        id: package
+      - name: Package architecture ZIPs and checksums
         shell: bash
-        env:
-          RELEASE_TAG: ${{ steps.meta.outputs.release_tag }}
         run: |
           set -euo pipefail
-          app_path="dist/远控听写·自动适配.app"
-          zip_name="DoubaoVoiceBridge-macOS-universal-${RELEASE_TAG}.zip"
-          checksum_name="${zip_name}.sha256"
-          ditto -c -k --sequesterRsrc --keepParent "$app_path" "dist/$zip_name"
-          (
-            cd dist
-            shasum -a 256 "$zip_name" > "$checksum_name"
-          )
-          {
-            echo "zip_name=$zip_name"
-            echo "checksum_name=$checksum_name"
-          } >> "$GITHUB_OUTPUT"
+          "$RUNNER_TEMP/package-release.sh" \
+            --project-root "$GITHUB_WORKSPACE" \
+            --app "$GITHUB_WORKSPACE/dist/远控听写·自动适配.app" \
+            --out-dir "$GITHUB_WORKSPACE/dist" \
+            --self-test
 
       - name: Upload verification artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: universal-${{ steps.meta.outputs.release_tag }}-${{ github.run_id }}
+          name: release-assets-${{ steps.meta.outputs.release_tag }}-${{ github.run_id }}
           path: |
-            dist/${{ steps.package.outputs.zip_name }}
-            dist/${{ steps.package.outputs.checksum_name }}
+            dist/DoubaoVoiceBridge-macOS-arm64-v${{ steps.meta.outputs.version }}.zip
+            dist/DoubaoVoiceBridge-macOS-arm64-v${{ steps.meta.outputs.version }}.zip.sha256
+            dist/DoubaoVoiceBridge-macOS-x86_64-v${{ steps.meta.outputs.version }}.zip
+            dist/DoubaoVoiceBridge-macOS-x86_64-v${{ steps.meta.outputs.version }}.zip.sha256
+            dist/DoubaoVoiceBridge-macOS-universal-v${{ steps.meta.outputs.version }}.zip
+            dist/DoubaoVoiceBridge-macOS-universal-v${{ steps.meta.outputs.version }}.zip.sha256
           if-no-files-found: error
           retention-days: 7
           overwrite: true
@@ -215,7 +214,7 @@ jobs:
       - name: Download verified build artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: universal-${{ needs.build.outputs.release_tag }}-${{ github.run_id }}
+          name: release-assets-${{ needs.build.outputs.release_tag }}-${{ github.run_id }}
           path: release-files
 
       - name: Publish GitHub Release
@@ -226,15 +225,18 @@ jobs:
           TARGET_SHA: ${{ needs.build.outputs.target_sha }}
           VERSION: ${{ needs.build.outputs.version }}
           BUILD_NUMBER: ${{ needs.build.outputs.build_number }}
-          ZIP_NAME: ${{ needs.build.outputs.zip_name }}
-          CHECKSUM_NAME: ${{ needs.build.outputs.checksum_name }}
         run: |
           set -euo pipefail
 
-          (
-            cd release-files
-            sha256sum --check "$CHECKSUM_NAME"
-          )
+          for architecture in arm64 x86_64 universal; do
+            zip_name="DoubaoVoiceBridge-macOS-${architecture}-v${VERSION}.zip"
+            checksum_name="${zip_name}.sha256"
+            [[ -s "release-files/$zip_name" && -s "release-files/$checksum_name" ]] || {
+              echo "Missing release package or checksum for $architecture" >&2
+              exit 1
+            }
+            (cd release-files && sha256sum --check "$checksum_name")
+          done
           tagged_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}" --jq '.sha')"
           if [[ "$tagged_sha" != "$TARGET_SHA" ]]; then
             echo "Tag $RELEASE_TAG moved after build validation; refusing to publish" >&2
@@ -243,14 +245,21 @@ jobs:
 
           notes_file="$(mktemp)"
           trap 'rm -f "$notes_file"' EXIT
+          asset_base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}"
           cat > "$notes_file" <<EOF
           这是 DoubaoVoiceBridge 的独立迭代 fork，提供便于直接安装的预构建版本。
+
+          | 设备 | ZIP 下载 | SHA-256 校验文件 |
+          | --- | --- | --- |
+          | Apple Silicon / M 系列（arm64） | [下载](${asset_base}/DoubaoVoiceBridge-macOS-arm64-${RELEASE_TAG}.zip) | [校验](${asset_base}/DoubaoVoiceBridge-macOS-arm64-${RELEASE_TAG}.zip.sha256) |
+          | Intel（x86_64） | [下载](${asset_base}/DoubaoVoiceBridge-macOS-x86_64-${RELEASE_TAG}.zip) | [校验](${asset_base}/DoubaoVoiceBridge-macOS-x86_64-${RELEASE_TAG}.zip.sha256) |
+          | 不确定芯片 | [通用版下载](${asset_base}/DoubaoVoiceBridge-macOS-universal-${RELEASE_TAG}.zip) | [校验](${asset_base}/DoubaoVoiceBridge-macOS-universal-${RELEASE_TAG}.zip.sha256) |
 
           - 暖灰蓝图标与设置、听写框主题，默认窗口更紧凑；豆包键和远控键可分别录制，提示随模式更新。
           - 独立远控键按住说话、松开结束并粘贴；跟随模式沿用豆包按键方式。
           - 投递前验证 UU 原窗口，并保护剪贴板内容与恢复状态。
 
-          提供 macOS 13+ arm64/x86_64 通用包。安装并授予所需权限后，在 UU 按录制的按键操作；请自行发送消息。
+          安装对应 ZIP 并授予所需权限后，在 UU 按录制的按键操作；请自行发送消息。
           上游：[DoubaoVoiceBridge](https://github.com/yupeng316888-create/DoubaoVoiceBridge)（MIT，保留原 LICENSE 版权声明）；优化已提交至[上游 PR #3](https://github.com/yupeng316888-create/DoubaoVoiceBridge/pull/3)。
           版本：v${VERSION}（build ${BUILD_NUMBER}）；源码提交：${TARGET_SHA}。ad-hoc 签名，未经 Apple 公证。
           EOF
@@ -261,5 +270,9 @@ jobs:
             --target "$TARGET_SHA" \
             --title "远控听写 v${VERSION}" \
             --notes-file "$notes_file" \
-            "release-files/$ZIP_NAME" \
-            "release-files/$CHECKSUM_NAME"
+            "release-files/DoubaoVoiceBridge-macOS-arm64-v${VERSION}.zip" \
+            "release-files/DoubaoVoiceBridge-macOS-arm64-v${VERSION}.zip.sha256" \
+            "release-files/DoubaoVoiceBridge-macOS-x86_64-v${VERSION}.zip" \
+            "release-files/DoubaoVoiceBridge-macOS-x86_64-v${VERSION}.zip.sha256" \
+            "release-files/DoubaoVoiceBridge-macOS-universal-v${VERSION}.zip" \
+            "release-files/DoubaoVoiceBridge-macOS-universal-v${VERSION}.zip.sha256"
