@@ -1,0 +1,267 @@
+name: Fork release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and upload a verification artifact without creating a Release
+        required: true
+        type: boolean
+        default: true
+      release_tag:
+        description: Existing vX.Y.Z tag to build; required when dry_run is false
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: ${{ github.repository == 'PengJunchen/DoubaoVoiceBridge' }}
+    runs-on: macos-15-intel
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      build_number: ${{ steps.meta.outputs.build_number }}
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      target_sha: ${{ steps.meta.outputs.target_sha }}
+      zip_name: ${{ steps.package.outputs.zip_name }}
+      checksum_name: ${{ steps.package.outputs.checksum_name }}
+    steps:
+      - name: Guard repository
+        shell: bash
+        env:
+          ACTUAL_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ "$ACTUAL_REPOSITORY" != "PengJunchen/DoubaoVoiceBridge" ]]; then
+            echo "Refusing to build outside PengJunchen/DoubaoVoiceBridge" >&2
+            exit 1
+          fi
+
+      - name: Check out event commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate source and version
+        id: meta
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          release_tag=""
+          target_sha=""
+
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            if [[ "$REF_TYPE" != "tag" ]]; then
+              echo "Only tag pushes may publish a release" >&2
+              exit 1
+            fi
+            release_tag="$REF_NAME"
+          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ "$GITHUB_REF" != "refs/heads/master" ]]; then
+              echo "Manual runs must use the default master branch" >&2
+              exit 1
+            fi
+            if [[ "$INPUT_DRY_RUN" != "true" && -z "$INPUT_RELEASE_TAG" ]]; then
+              echo "Set release_tag to an existing vX.Y.Z tag when dry_run is false" >&2
+              exit 1
+            fi
+            release_tag="$INPUT_RELEASE_TAG"
+          else
+            echo "Unsupported event: $EVENT_NAME" >&2
+            exit 1
+          fi
+
+          if [[ -n "$release_tag" ]]; then
+            if [[ ! "$release_tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+              echo "Release tag must use the vX.Y.Z format" >&2
+              exit 1
+            fi
+            target_sha="$(git rev-parse --verify "refs/tags/${release_tag}^{commit}")"
+            if [[ "$EVENT_NAME" == "push" && "$target_sha" != "$GITHUB_SHA" ]]; then
+              echo "The pushed tag does not resolve to the event commit" >&2
+              exit 1
+            fi
+          else
+            target_sha="$GITHUB_SHA"
+          fi
+
+          if ! git merge-base --is-ancestor "$target_sha" refs/remotes/origin/master; then
+            echo "Release source must be a commit reachable from master" >&2
+            exit 1
+          fi
+          git checkout --detach "$target_sha"
+
+          version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)"
+          build_number="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' Resources/Info.plist)"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Info.plist version must use X.Y.Z" >&2
+            exit 1
+          fi
+          if [[ ! "$build_number" =~ ^[0-9]+$ ]]; then
+            echo "Info.plist build number must be numeric" >&2
+            exit 1
+          fi
+
+          expected_tag="v${version}"
+          if [[ -n "$release_tag" && "$release_tag" != "$expected_tag" ]]; then
+            echo "Tag $release_tag does not match Info.plist version $version" >&2
+            exit 1
+          fi
+          release_tag="$expected_tag"
+
+          {
+            echo "version=$version"
+            echo "build_number=$build_number"
+            echo "release_tag=$release_tag"
+            echo "target_sha=$target_sha"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build universal app
+        run: ./scripts/build-app.sh
+
+      - name: Verify app signature and architectures
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_path="dist/远控听写·自动适配.app"
+          binary_path="$app_path/Contents/MacOS/DoubaoVoiceBridge"
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+          architectures="$(lipo -archs "$binary_path")"
+          case "$architectures" in
+            "arm64 x86_64"|"x86_64 arm64") ;;
+            *)
+              echo "Expected exactly arm64 and x86_64; found: $architectures" >&2
+              exit 1
+              ;;
+          esac
+          echo "Verified universal architectures: $architectures"
+
+      - name: Package app and checksum
+        id: package
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.meta.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          app_path="dist/远控听写·自动适配.app"
+          zip_name="DoubaoVoiceBridge-macOS-universal-${RELEASE_TAG}.zip"
+          checksum_name="${zip_name}.sha256"
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" "dist/$zip_name"
+          (
+            cd dist
+            shasum -a 256 "$zip_name" > "$checksum_name"
+          )
+          {
+            echo "zip_name=$zip_name"
+            echo "checksum_name=$checksum_name"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload verification artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: universal-${{ steps.meta.outputs.release_tag }}-${{ github.run_id }}
+          path: |
+            dist/${{ steps.package.outputs.zip_name }}
+            dist/${{ steps.package.outputs.checksum_name }}
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+  publish:
+    needs: build
+    if: ${{ github.repository == 'PengJunchen/DoubaoVoiceBridge' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Guard repository and tag target
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+          TARGET_SHA: ${{ needs.build.outputs.target_sha }}
+          VERSION: ${{ needs.build.outputs.version }}
+          BUILD_NUMBER: ${{ needs.build.outputs.build_number }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REPOSITORY" != "PengJunchen/DoubaoVoiceBridge" ]]; then
+            echo "Refusing to publish outside PengJunchen/DoubaoVoiceBridge" >&2
+            exit 1
+          fi
+          if [[ ! "$RELEASE_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || [[ "${BASH_REMATCH[1]}" != "$VERSION" ]]; then
+            echo "Refusing to publish a tag that does not match the app version" >&2
+            exit 1
+          fi
+          if [[ ! "$TARGET_SHA" =~ ^[[:xdigit:]]{40}$ || ! "$BUILD_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "Invalid release metadata" >&2
+            exit 1
+          fi
+
+      - name: Download verified build artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: universal-${{ needs.build.outputs.release_tag }}-${{ github.run_id }}
+          path: release-files
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+          TARGET_SHA: ${{ needs.build.outputs.target_sha }}
+          VERSION: ${{ needs.build.outputs.version }}
+          BUILD_NUMBER: ${{ needs.build.outputs.build_number }}
+          ZIP_NAME: ${{ needs.build.outputs.zip_name }}
+          CHECKSUM_NAME: ${{ needs.build.outputs.checksum_name }}
+        run: |
+          set -euo pipefail
+
+          (
+            cd release-files
+            sha256sum --check "$CHECKSUM_NAME"
+          )
+          tagged_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}" --jq '.sha')"
+          if [[ "$tagged_sha" != "$TARGET_SHA" ]]; then
+            echo "Tag $RELEASE_TAG moved after build validation; refusing to publish" >&2
+            exit 1
+          fi
+
+          notes_file="$(mktemp)"
+          trap 'rm -f "$notes_file"' EXIT
+          cat > "$notes_file" <<EOF
+          这是 DoubaoVoiceBridge 独立社区 fork 的便捷预构建包，方便用户直接安装。
+
+          - 应用版本：${VERSION}（build ${BUILD_NUMBER}）
+          - 源码提交：${TARGET_SHA}
+          - 架构：arm64 和 x86_64 通用包
+          - 上游项目：https://github.com/yupeng316888-create/DoubaoVoiceBridge（MIT；原 LICENSE 版权声明保留）
+          - 已向上游提交优化：[PR #3](https://github.com/yupeng316888-create/DoubaoVoiceBridge/pull/3)
+          - fork 改进：独立按键录制、准确长按交互、简化设置界面与剪贴板保护
+          - 签名：ad-hoc；没有 Apple Developer ID 签名或公证
+
+          下载 ZIP 并用随附的 SHA-256 文件校验，解压后将应用移入“应用程序”。macOS 可能要求确认这个未公证的构建后才允许打开。
+          EOF
+
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --target "$TARGET_SHA" \
+            --title "DoubaoVoiceBridge v${VERSION} (build ${BUILD_NUMBER})" \
+            --notes-file "$notes_file" \
+            "release-files/$ZIP_NAME" \
+            "release-files/$CHECKSUM_NAME"
