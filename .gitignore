@@ -21,3 +21,10 @@ xcuserdata/
 *.key
 *.p12
 *.pfx
+
+# Windows/.NET build products
+**/bin/
+**/obj/
+*.user
+*.suo
+TestResults/

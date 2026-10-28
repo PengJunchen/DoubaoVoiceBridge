@@ -21,6 +21,12 @@
 
 本工具只粘贴文字，不替用户向远端发送消息。
 
+## Windows 预验证版
+
+Windows 实现位于 `windows/`，与现有 Swift/macOS 应用独立构建。它沿用「本机豆包听写框 → UU 剪贴板同步 → 原会话粘贴」流程，提供托盘设置、专用触发键、按住/切换语音模式、粘贴测试及脱敏诊断导出。
+
+首次使用请保留手动启动豆包与手动确认粘贴，完成实机验收后再开启模拟快捷键和自动粘贴。当前环境已完成的验证及尚待 Windows 实机确认的部分见 [Windows 验证记录](docs/windows/validation.md)。安装、构建与日志回传见 [Windows 使用说明](windows/README.md)，方案依据见 [Windows 架构与可行性](docs/windows/architecture.md)。
+
 ## 构建
 
 需要 Xcode Command Line Tools 和 Swift 5.9 或更高版本：
