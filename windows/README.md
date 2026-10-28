@@ -1,4 +1,4 @@
-# 远控听写 · Windows 预验证版
+# 远控听写 · Windows v0.1.0 预验证版
 
 Windows 原生托盘应用：在本机豆包输入法中完成语音识别，再通过 UU 剪贴板同步粘贴到原远控会话。与现有 macOS 应用遵循同一工作流程，Swift/macOS 源码不受影响。
 
@@ -35,6 +35,8 @@ pwsh ./scripts/build-windows.ps1
 ```
 
 输出到 `dist/windows/`，包含 x64、ARM64 自包含 ZIP、SHA-256 和每个包的 `build-info.json`。默认先运行核心测试；`-Runtime win-x64` 可只构建一个架构。`-SkipTests` 仅用于已完成测试后的重复打包。ZIP 尚未进行代码签名。
+
+Windows 项目的产品与程序集版本统一由 `windows/Directory.Build.props` 定义，当前与 macOS 一致为 `0.1.0`。打包脚本同时校验 Windows manifest 版本，避免包名、程序集及应用清单出现不同版本。
 
 在有交互桌面的 Windows 机器上可额外运行：
 

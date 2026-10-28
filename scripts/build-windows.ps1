@@ -11,9 +11,11 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { $OutputDirectory = Join-Path $projectRoot 'dist/windows' }
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 $projectPath = Join-Path $projectRoot 'windows/src/DoubaoVoiceBridge.Windows/DoubaoVoiceBridge.Windows.csproj'
-[xml] $projectXml = Get-Content -LiteralPath $projectPath -Raw
-$version = [string] $projectXml.Project.PropertyGroup.Version
-if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Project Version must be X.Y.Z.' }
+[xml] $versionXml = Get-Content -LiteralPath (Join-Path $projectRoot 'windows/Directory.Build.props') -Raw
+$version = [string] $versionXml.Project.PropertyGroup.Version
+if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Shared Windows Version must be X.Y.Z.' }
+[xml] $manifestXml = Get-Content -LiteralPath (Join-Path $projectRoot 'windows/src/DoubaoVoiceBridge.Windows/app.manifest') -Raw
+if ([string] $manifestXml.assembly.assemblyIdentity.version -ne "$version.0") { throw 'Windows manifest version does not match the shared version.' }
 $null = Get-Command dotnet -ErrorAction Stop
 $commit = (& git -C $projectRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-f]{40}$') { throw 'Cannot resolve source revision.' }
