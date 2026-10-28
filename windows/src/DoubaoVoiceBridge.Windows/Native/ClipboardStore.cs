@@ -14,6 +14,8 @@ internal sealed class ClipboardStore : IDisposable
     private readonly HashSet<uint> _safeFormats;
     private sealed record Entry(uint Format, byte[] Bytes);
     private sealed record Snapshot(List<Entry> Entries, string StagedText);
+    internal sealed record PublicationDiagnostics(uint WritingSequence, uint PublishedSequence, bool OwnerMatches, bool TextMatches);
+    internal PublicationDiagnostics? LastPublication { get; private set; }
 
     internal ClipboardStore()
     {
@@ -46,25 +48,52 @@ internal sealed class ClipboardStore : IDisposable
         var bytes = Encoding.Unicode.GetBytes(text + '\0');
         if (bytes.Length > MaxBytes) throw new NativeBridgeException("clipboard_transcript_too_large");
         var memory = Allocate(bytes);
+        LastPublication = null;
+        uint writingSequence = 0;
+        List<Entry>? entries = null;
         try
         {
-            using var clipboard = Enter();
-            var entries = captureSnapshot ? CaptureEntries() : null;
-            if (!NativeMethods.EmptyClipboard()) throw new NativeBridgeException("clipboard_clear_failed", Marshal.GetLastWin32Error());
-            if (NativeMethods.SetClipboardData(UnicodeText, memory) == 0)
+            using (var clipboard = Enter())
             {
-                var error = Marshal.GetLastWin32Error();
-                if (entries is not null)
+                entries = captureSnapshot ? CaptureEntries() : null;
+                if (!NativeMethods.EmptyClipboard()) throw new NativeBridgeException("clipboard_clear_failed", Marshal.GetLastWin32Error());
+                if (NativeMethods.SetClipboardData(UnicodeText, memory) == 0)
                 {
-                    try { RestoreEntries(entries); }
-                    catch (NativeBridgeException) { throw new NativeBridgeException("clipboard_write_and_rollback_failed", error); }
+                    var error = Marshal.GetLastWin32Error();
+                    if (entries is not null)
+                    {
+                        try { RestoreEntries(entries); }
+                        catch (NativeBridgeException) { throw new NativeBridgeException("clipboard_write_and_rollback_failed", error); }
+                    }
+                    throw new NativeBridgeException("clipboard_write_failed", error);
                 }
-                throw new NativeBridgeException("clipboard_write_failed", error);
-            }
-            memory = 0; // ownership transferred to Windows
-            return new ClipboardLease(NativeMethods.GetClipboardSequenceNumber(), entries is null ? null : new Snapshot(entries, text));
+                memory = 0; // ownership transferred to Windows
+                writingSequence = NativeMethods.GetClipboardSequenceNumber();
+            } // Publish first. Windows can finish clipboard bookkeeping when the writer closes it.
+
+            // A sequence read inside the writing transaction can precede publication. Reopen after
+            // CloseClipboard and prove ownership + payload under this lock before claiming a lease.
+            // If another app copied even identical text in between, its different owner fails closed.
+            using var publishedClipboard = Enter();
+            var ownerMatches = NativeMethods.GetClipboardOwner() == _owner.Handle;
+            var textMatches = string.Equals(ReadText(), text, StringComparison.Ordinal);
+            var sequence = NativeMethods.GetClipboardSequenceNumber();
+            LastPublication = new PublicationDiagnostics(writingSequence, sequence, ownerMatches, textMatches);
+            if (!ownerMatches || !textMatches) throw new NativeBridgeException("clipboard_changed_after_staging");
+            if (sequence == 0) throw new NativeBridgeException("clipboard_sequence_unavailable");
+            return new ClipboardLease(sequence, entries is null ? null : new Snapshot(entries, text));
         }
         finally { if (memory != 0) NativeMethods.GlobalFree(memory); }
+    }
+
+    internal sealed record LeaseDiagnostics(uint LeaseSequence, uint CurrentSequence, bool OwnerMatches, bool TextMatches, bool HasSnapshot);
+
+    internal LeaseDiagnostics InspectLease(ClipboardLease lease)
+    {
+        using var clipboard = Enter();
+        var ownerMatches = NativeMethods.GetClipboardOwner() == _owner.Handle;
+        var textMatches = lease.Snapshot is Snapshot snapshot && string.Equals(ReadText(), snapshot.StagedText, StringComparison.Ordinal);
+        return new LeaseDiagnostics(lease.Sequence, NativeMethods.GetClipboardSequenceNumber(), ownerMatches, textMatches, lease.Snapshot is Snapshot);
     }
 
     internal bool Contains(string text)
